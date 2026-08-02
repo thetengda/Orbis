@@ -1,0 +1,9 @@
+libdir=D:/lib/vcpkg-master/packages/openblas_x64-windows/lib
+includedir=D:/lib/vcpkg-master/packages/openblas_x64-windows/include
+
+Name: OpenBLAS
+Description: OpenBLAS is an optimized BLAS library based on GotoBLAS2 1.13 BSD version
+Version: 
+URL: https://github.com/xianyi/OpenBLAS
+Libs: -L${libdir} -lopenblas
+Cflags: -I${includedir}

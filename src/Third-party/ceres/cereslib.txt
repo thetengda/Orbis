@@ -1,0 +1,17 @@
+ceres.lib
+gflags.lib
+glog.lib
+lapack.lib
+libamd.lib
+libbtf.lib
+libcamd.lib
+libccolamd.lib
+libcholmod.lib
+libcolamd.lib
+libcxsparse.lib
+libklu.lib
+libldl.lib
+libspqr.lib
+libumfpack.lib
+openblas.lib
+suitesparseconfig.lib
