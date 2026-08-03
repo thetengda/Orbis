@@ -296,6 +296,9 @@ namespace gnut
          */
         bool apply_code_phase_bias(t_gallbias *allbias);
 
+        /** @brief Check whether an observation received an OSB correction. */
+        bool osb_corrected(const GOBS &obs) const;
+
         /**
          * @brief apply dcb
          * 
@@ -1066,6 +1069,7 @@ namespace gnut
         bool _isDoubleIf = false;
         bool _dcb_correct_mark;   // mark for correct dcb; true: dcb corrected; false: not corrected;
         bool _phase_correct_mark; // phase correct mark
+        set<GOBS> _osb_corrected; // observations successfully corrected by OSB
         bool _range_smooth_mark;  // true, smooth; false, not smooth
         bool _bds_code_bias_mark; // true, correct; false, not correct
     };

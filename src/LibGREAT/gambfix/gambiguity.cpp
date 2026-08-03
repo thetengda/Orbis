@@ -668,6 +668,7 @@ namespace great
             if (it_par->str_type().find("AMB") == string::npos ||
                 it_par->str_type().find("AMB13") != string::npos ||
                 _sat_rm.find(it_par->prn) != _sat_rm.end() ||
+                _excluded_amb.find(make_pair(it_par->prn, it_par->parType)) != _excluded_amb.end() ||
                 double_eq(it_par->value(), 0.0))
             {
                 continue;

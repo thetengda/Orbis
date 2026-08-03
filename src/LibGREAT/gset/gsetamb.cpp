@@ -38,7 +38,7 @@ namespace great
     {
         _gmutex.lock();
         cerr << "<ambiguity>\n"
-             << "<upd_mode> upd </upd_mode>\n"
+             << "<upd_mode> UPD/OSB </upd_mode>\n"
              << "<fix_mode> SEARCH/NO </fix_mode>\n"
              << "<ratio> 3.0 </ratio>\n"
              << "<all_baselines> NO </all_baselines>\n"
@@ -198,6 +198,10 @@ namespace great
         if (str == "UPD" || str == "upd")
         {
             return UPD_MODE::UPD;
+        }
+        else if (str == "OSB" || str == "osb")
+        {
+            return UPD_MODE::OSB;
         }
         else
         {

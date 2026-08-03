@@ -86,6 +86,8 @@ namespace gnut
         virtual void _add_data(string id, t_gdata *pt_data);
 
         t_gallbias *_allbias; ///< 
+
+        t_gtime::t_tsys _bias_tsys = t_gtime::TAI; ///< time system from BIAS/DESCRIPTION
     };
 
 } // namespace

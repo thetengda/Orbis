@@ -49,6 +49,9 @@ namespace gnut
         if ((idx = _line.find("_STD_DEV___")) != string::npos)
             _mapidx["STD"] = make_pair(idx, 11);
 
+        if ((idx = _line.find("__ESTIMATED_SLOPE____")) != string::npos)
+            _mapidx["SLOPE"] = make_pair(idx, 21);
+
         return 1;
     }
 
@@ -83,8 +86,24 @@ namespace gnut
             }
             else if (_line.find(" TIME_SYSTEM ") != string::npos)
             {
+                string ts_str = trim(cut_crlf(_line.substr(31)));
+                if (ts_str.size() == 1)
+                {
+                    switch (ts_str[0])
+                    {
+                    case 'G': _bias_tsys = t_gtime::GPS; break;
+                    case 'C': _bias_tsys = t_gtime::BDS; break;
+                    case 'R': _bias_tsys = t_gtime::GLO; break;
+                    case 'E': _bias_tsys = t_gtime::GAL; break;
+                    default:  _bias_tsys = t_gtime::TAI; break;
+                    }
+                }
+                else
+                {
+                    _bias_tsys = t_gtime::str2tsys(ts_str);
+                }
                 if (_spdlog)
-                    SPDLOG_LOGGER_DEBUG(_spdlog, "Read BIAS/TSY: " + cut_crlf(_line.substr(31)));
+                    SPDLOG_LOGGER_DEBUG(_spdlog, "Read BIAS/TSY: " + ts_str);
             }
         }
         else if (_block.find("BIAS/SOLUTION") != string::npos)
@@ -95,7 +114,10 @@ namespace gnut
             gobs1 = gobs2 = X;
             t_gtime beg = FIRST_TIME;
             t_gtime end = LAST_TIME;
+            beg.tsys(_bias_tsys);
+            end.tsys(_bias_tsys);
             double dcb = 0.0;
+            double slope_ns = 0.0;
 
             for (auto it = _mapidx.begin(); it != _mapidx.end(); it++)
             {
@@ -113,13 +135,17 @@ namespace gnut
                     end.from_str("%Y:%j:%s", _line.substr(pos, len));
                 if (it->first == "EST")
                     dcb = str2dbl(_line.substr(pos, len));
+                if (it->first == "SLOPE")
+                    slope_ns = str2dbl(_line.substr(pos, len));
             }
             shared_ptr<t_gbias> p_bias;
 
             if (_allbias)
             {
                 p_bias = make_shared<t_gbias>(_spdlog);
-                p_bias->set(beg, end, dcb * 1e-9 * CLIGHT, gobs1, gobs2);
+                double val = dcb * 1e-9 * CLIGHT;
+                double slope = slope_ns * 1e-9 * CLIGHT;
+                p_bias->set(beg, end, val, slope, gobs1, gobs2);
                 _allbias->add(_ac, beg, prn, p_bias);
             }
         }

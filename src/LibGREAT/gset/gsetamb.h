@@ -56,7 +56,8 @@ namespace great
     /** @brief enum of UPD mode. */
     enum class UPD_MODE
     {
-        UPD    ///< wl upd + nl upd.
+        UPD,   ///< wl upd + nl upd.
+        OSB    ///< observable-specific bias mode.
     };
     //enum class AMB_TYPE
     //{

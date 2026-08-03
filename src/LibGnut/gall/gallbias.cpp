@@ -52,6 +52,7 @@ namespace gnut
     t_gallbias::~t_gallbias()
     {
         _mapBias.clear();
+        _phaseOsbAC.clear();
     }
 
     void t_gallbias::add(const string &ac, const t_gtime &epo, const string &obj, t_spt_bias pt_cb)
@@ -63,6 +64,11 @@ namespace gnut
         {
             _gmutex.unlock();
             return;
+        }
+
+        if (pt_cb->ref() == X && t_gobs(pt_cb->gobs()).is_phase())
+        {
+            _phaseOsbAC.insert(ac);
         }
 
         if (pt_cb->ref() == X)
@@ -115,6 +121,52 @@ namespace gnut
         return;
     }
 
+    bool t_gallbias::get_osb(const t_gtime &epo, const string &obj, const GOBS &gobs, double &bias)
+    {
+        _gmutex.lock();
+
+        bias = 0.0;
+        if (_phaseOsbAC.empty())
+        {
+            _gmutex.unlock();
+            return false;
+        }
+
+        string ac;
+        int best_order = 999;
+        for (const auto &candidate : _phaseOsbAC)
+        {
+            auto order = _acOrder.find(candidate);
+            int candidate_order = order == _acOrder.end() ? 998 : order->second;
+            if (candidate_order < best_order)
+            {
+                ac = candidate;
+                best_order = candidate_order;
+            }
+        }
+
+        GOBS converted = gobs;
+        _convert_obstype(ac, obj, converted);
+        t_spt_bias osb = _find(ac, epo, obj, converted);
+        if (osb == nullptr || osb->ref() != X)
+        {
+            _gmutex.unlock();
+            return false;
+        }
+
+        bias = osb->bias(epo);
+        _gmutex.unlock();
+        return true;
+    }
+
+    bool t_gallbias::has_phase_osb()
+    {
+        _gmutex.lock();
+        bool available = !_phaseOsbAC.empty();
+        _gmutex.unlock();
+        return available;
+    }
+
     double t_gallbias::get(const string &prd, const t_gtime &epo, const string &prn, const GOBS &gobs, const bool &meter)
     {
         _gmutex.lock();
@@ -135,7 +187,7 @@ namespace gnut
                 if (itSAT != itEPO->second.end() && itSAT->second.find(gobs) != itSAT->second.end())
                 {
                     t_spt_bias pobs1 = itSAT->second.find(gobs)->second;
-                    bias = pobs1->bias();
+                    bias = pobs1->bias(epo);
                 }
             }
         }
@@ -213,7 +265,7 @@ namespace gnut
             t_spt_bias pobs1 = _find(ac, epo, obj, gobs1_convert);
             if (pobs1 != nullptr)
             {
-                dcb = pobs1->bias();
+                dcb = pobs1->bias(epo);
             }
         }
         else
@@ -230,11 +282,11 @@ namespace gnut
 
             if (pobs1 != nullptr && pobs2 != nullptr && pobs1->ref() == pobs2->ref())
             {
-                dcb = pobs1->bias() - pobs2->bias();
+                dcb = pobs1->bias(epo) - pobs2->bias(epo);
             }
             if (pobs1 != nullptr && pobs2 != nullptr && pobs2->gobs()==C6C)
             {
-                dcb = pobs1->bias() - pobs2->bias();
+                dcb = pobs1->bias(epo) - pobs2->bias(epo);
             }
         }
 
@@ -255,10 +307,11 @@ namespace gnut
             if (itEPO == itAC->second.end() && itAC->second.size() != 0)
                 itEPO--; // no epochs
 
-            if (itEPO != itAC->second.end())
+            auto searchEPO = itEPO;
+            while (searchEPO != itAC->second.end())
             {
-                auto itOBJ = itEPO->second.find(obj);
-                if (itOBJ != itEPO->second.end())
+                auto itOBJ = searchEPO->second.find(obj);
+                if (itOBJ != searchEPO->second.end())
                 {
 
                     auto itGOBS = itOBJ->second.find(obs);
@@ -272,9 +325,13 @@ namespace gnut
                         if (itGOBS->second->valid(epo))
                         {
                             pt_bias = itGOBS->second;
+                            break;
                         }
                     }
                 }
+                if (searchEPO == itAC->second.begin())
+                    break;
+                --searchEPO;
             }
         }
 

@@ -253,6 +253,9 @@ namespace great
 
         /** @brief set Active Amb. */
         void setActiveAmb(int max) { _max_active_amb_one_epo = max; }
+
+        /** @brief Exclude ambiguity parameters whose observations lack OSB corrections. */
+        void setExcludedAmb(const set<pair<string, par_type>> &excluded) { _excluded_amb = excluded; }
         
     protected:
         CONSTRPAR _crd_est; ///< _crd_est
@@ -266,6 +269,7 @@ namespace great
         string _site;          ///< current site
         set<string> _sat_rm;   ///< satellites being removed
         set<string> _sat_refs; ///< reference satellites
+        set<pair<string, par_type>> _excluded_amb; ///< ambiguities not eligible for integer fixing
 
         int _frequency;                    ///< frequency
         t_DD_amb _DD;                      ///< DD over all baslines

@@ -66,6 +66,8 @@ great::t_gpvtflt::t_gpvtflt(string mark, string mark_base, t_gsetbase *gset, t_g
     this->setOBJ(dynamic_cast<t_gallobj *>((*_allproc)[t_gdata::ALLOBJ]));
     this->setDCB(dynamic_cast<t_gallbias *>((*_allproc)[t_gdata::ALLBIAS]));
     this->setFCB(dynamic_cast<t_gallbias *>((*_allproc)[t_gdata::ALLBIAS]));
+    if (_upd_mode == UPD_MODE::OSB)
+        _gupd = nullptr;
 
     _frequency = dynamic_cast<t_gsetproc *>(gset)->frequency();
     _slip_model = dynamic_cast<t_gsetproc *>(gset)->slip_model();
@@ -160,6 +162,8 @@ great::t_gpvtflt::t_gpvtflt(string mark, string mark_base, t_gsetbase *gset, t_s
     this->setOBJ(dynamic_cast<t_gallobj*>((*_allproc)[t_gdata::ALLOBJ]));
     this->setDCB(dynamic_cast<t_gallbias*>((*_allproc)[t_gdata::ALLBIAS]));
     this->setFCB(dynamic_cast<t_gallbias*>((*_allproc)[t_gdata::ALLBIAS]));
+    if (_upd_mode == UPD_MODE::OSB)
+        _gupd = nullptr;
     _frequency = dynamic_cast<t_gsetproc*>(gset)->frequency();
     _slip_model = dynamic_cast<t_gsetproc*>(gset)->slip_model();
     _gpre = make_shared<t_gpreproc>(_gobs, gset);
@@ -1549,6 +1553,66 @@ int great::t_gpvtflt::_amb_resolution()
     SymmetricMatrix Qx_tmp = _filter->Qx();
     _param_fixed = _filter->param();
     _amb_state = false;
+    _osb_unfixable_amb.clear();
+
+    if (_upd_mode == UPD_MODE::OSB)
+    {
+        t_gallpar fix_params = _filter->param();
+        for (unsigned int i = 0; i < fix_params.parNumber(); i++)
+        {
+            if (t_gpar::is_amb(fix_params[i].parType))
+                _osb_unfixable_amb.insert(make_pair(fix_params[i].prn, fix_params[i].parType));
+        }
+
+        if (_gallbias != nullptr && _gallbias->has_phase_osb())
+        {
+            for (const auto &amb_obs : _amb_obs)
+            {
+                const string &sat = amb_obs.first.first;
+                auto rover = find_if(_data.begin(), _data.end(),
+                                     [&sat](const t_gsatdata &data) { return data.sat() == sat; });
+                if (rover == _data.end())
+                    continue;
+
+                const auto &obs_ids = amb_obs.second;
+                bool corrected = true;
+                auto check_site_obs = [&corrected](const t_gsatdata &data, const GOBS &phase_obs)
+                {
+                    if (!corrected || phase_obs == X || !data.osb_corrected(phase_obs))
+                    {
+                        corrected = false;
+                        return;
+                    }
+                    GOBS code_obs = data.select_range(t_gobs(phase_obs).band());
+                    if (code_obs == X || !data.osb_corrected(code_obs))
+                        corrected = false;
+                };
+
+                check_site_obs(*rover, get<0>(obs_ids));
+                if (get<1>(obs_ids) != X)
+                    check_site_obs(*rover, get<1>(obs_ids));
+
+                if (_isBase)
+                {
+                    auto base = find_if(_data_base.begin(), _data_base.end(),
+                                        [&sat](const t_gsatdata &data) { return data.sat() == sat; });
+                    if (base == _data_base.end())
+                    {
+                        corrected = false;
+                    }
+                    else
+                    {
+                        check_site_obs(*base, get<2>(obs_ids));
+                        if (get<3>(obs_ids) != X)
+                            check_site_obs(*base, get<3>(obs_ids));
+                    }
+                }
+
+                if (corrected)
+                    _osb_unfixable_amb.erase(amb_obs.first);
+            }
+        }
+    }
     
     if (_fix_mode != FIX_MODE::NO )
     {
@@ -1573,6 +1637,7 @@ int great::t_gpvtflt::_amb_resolution()
         }
         _ambfix->setObsType(_observ);
         _ambfix->setActiveAmb(_filter->npar_number());
+        _ambfix->setExcludedAmb(_osb_unfixable_amb);
         if (_observ == OBSCOMBIN::IONO_FREE)
             _ambfix->setMW(_MW[_epoch]);
         else
@@ -1678,6 +1743,9 @@ bool t_gpvtflt::_getSatRef()
         for (int i = 0; i < params_ALL.parNumber(); i++)
         {
             if (params_ALL[i].str_type().find("AMB") == string::npos)
+                continue;
+
+            if (_osb_unfixable_amb.find(make_pair(params_ALL[i].prn, params_ALL[i].parType)) != _osb_unfixable_amb.end())
                 continue;
 
             if (t_gsys::sat2gsys(params_ALL[i].prn) != sys)
@@ -2097,7 +2165,7 @@ int great::t_gpvtflt::ProcessOneEpoch(const t_gtime &now, vector<t_gsatdata> *da
 
 void great::t_gpvtflt::Add_UPD(t_gupd *gupd)
 {
-    _gupd = gupd;
+    _gupd = (_upd_mode == UPD_MODE::OSB) ? nullptr : gupd;
 }
 
 int great::t_gpvtflt::_selcomsat(vector<t_gsatdata> &data_base, vector<t_gsatdata> &data_rover)

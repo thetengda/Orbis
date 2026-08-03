@@ -85,6 +85,12 @@ namespace gnut
         */
         double get(const string &prd, const t_gtime &epo, const string &obj, const GOBS &gobs1, const bool &meter = true);
 
+        /** @brief get an absolute observable-specific bias in meters. */
+        bool get_osb(const t_gtime &epo, const string &obj, const GOBS &gobs, double &bias);
+
+        /** @brief return whether the loaded bias product contains absolute phase OSBs. */
+        bool has_phase_osb();
+
         /**
         * @brief get ac list.
         * @return ac list
@@ -176,6 +182,7 @@ namespace gnut
         bool _isOverWrite = false; ///< flag of overwrite
         bool _isOrdered = false;   ///< if AC is ordered
         t_map_ac _mapBias;         ///< map of all satellite biases (all ACs & all period & all objects)
+        set<string> _phaseOsbAC;    ///< analysis centers providing absolute phase OSBs
     };
 
 } // namespace

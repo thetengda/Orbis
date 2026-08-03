@@ -47,10 +47,14 @@ namespace gnut
 
         /** @brief add single differential bias in meters. */
         void set(const t_gtime &beg, const t_gtime &end, double d, GOBS obs1, GOBS obs2 = X);
+        void set(const t_gtime &beg, const t_gtime &end, double d, double slope, GOBS obs1, GOBS obs2 = X);
         void set(double d, GOBS obs1, GOBS obs2 = X);
 
-        /** @brief get signgle differential bias. */
+        /** @brief get single differential bias. */
         double bias(bool meter = true);
+
+        /** @brief get bias with time interpolation (slope-aware). */
+        double bias(const t_gtime &epo, bool meter = true);
 
         GOBS gobs() const { return _gobs; }
         double val() const { return _val; }
@@ -73,6 +77,8 @@ namespace gnut
         GOBS _gobs;  ///< observation
         GOBS _ref;   ///< reference
         double _val; ///< code biases are stored in meters
+        double _slope; ///< rate of change [m/s]
+        t_gtime _midpoint; ///< midpoint of validity interval [_beg, _end]
     };
 
 } // namespace

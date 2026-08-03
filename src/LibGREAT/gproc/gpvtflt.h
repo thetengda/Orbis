@@ -367,6 +367,7 @@ namespace great
         vector<pair<string, pair<FREQ_SEQ, GOBSTYPE>>> _obs_index;///< obs index
 
         map<pair<string, par_type>, tuple<GOBS, GOBS, GOBS, GOBS>> _amb_obs;
+        set<pair<string, par_type>> _osb_unfixable_amb;///< ambiguity parameters with incomplete OSB corrections
         ColumnVector _vBanc_base;          ///< _vBanc_base
         map<GSYS, map<FREQ_SEQ, GOBSBAND>> _band_index;///< band index
         map<GSYS, map<GOBSBAND, FREQ_SEQ>> _freq_index;///< freq index

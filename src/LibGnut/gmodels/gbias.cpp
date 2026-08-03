@@ -21,6 +21,8 @@ namespace gnut
     {
         _beg = FIRST_TIME;
         _end = LAST_TIME;
+        _slope = 0.0;
+        _midpoint = FIRST_TIME;
 
         id_type(t_gdata::BIAS);
         id_group(t_gdata::GRP_MODEL);
@@ -30,6 +32,8 @@ namespace gnut
     {
         _beg = FIRST_TIME;
         _end = LAST_TIME;
+        _slope = 0.0;
+        _midpoint = FIRST_TIME;
 
         id_type(t_gdata::BIAS);
         id_group(t_gdata::GRP_MODEL);
@@ -45,17 +49,51 @@ namespace gnut
             return (_val / CLIGHT) * 1e9;
     }
 
+    double t_gbias::bias(const t_gtime &epo, bool meter)
+    {
+        double result = _val;
+        if (_slope != 0.0)
+        {
+            double dt = epo - _midpoint;
+            result += _slope * dt;
+        }
+        if (meter)
+            return result;
+        else
+            return (result / CLIGHT) * 1e9;
+    }
+
     void t_gbias::set(const t_gtime &beg, const t_gtime &end, double val, GOBS obs1, GOBS obs2)
     {
         _gmutex.lock();
 
         _beg = beg;
         _end = end;
+        _midpoint = beg + (end - beg) / 2.0;
 
         _gobs = obs1;
         _ref = obs2;
 
         _val = val;
+        _slope = 0.0;
+
+        _gmutex.unlock();
+        return;
+    }
+
+    void t_gbias::set(const t_gtime &beg, const t_gtime &end, double val, double slope, GOBS obs1, GOBS obs2)
+    {
+        _gmutex.lock();
+
+        _beg = beg;
+        _end = end;
+        _midpoint = beg + (end - beg) / 2.0;
+
+        _gobs = obs1;
+        _ref = obs2;
+
+        _val = val;
+        _slope = slope;
 
         _gmutex.unlock();
         return;
@@ -69,6 +107,7 @@ namespace gnut
         _ref = obs2;
 
         _val = val;
+        _slope = 0.0;
 
         _gmutex.unlock();
         return;

@@ -229,7 +229,8 @@ namespace great
             l_IF = coef1 * temp_equ.l[0] + coef2 * temp_equ.l[1];
 
             //jdhuang :
-            if (_ifcb_model == IFCB_MODEL::COR && _frequency == 3 && gobs1.is_phase() && _freq_index[gsys][b2] == FREQ_3 && obsdata.gsys() == GPS)
+            if (_ifcb_model == IFCB_MODEL::COR && _frequency == 3 && gobs1.is_phase() && _freq_index[gsys][b2] == FREQ_3 && obsdata.gsys() == GPS
+                && (_gallbias == nullptr || !_gallbias->has_phase_osb()))
             {
                 l_IF += dynamic_cast<t_gprecisebias *>(_bias_model.get())->ifcbDelay(obsdata, nullptr, OBSCOMBIN::IONO_FREE);
             }
@@ -438,7 +439,8 @@ namespace great
                 tempL.B[0].push_back(make_pair(idx + 1, 1.0));
                 tempL.l[0] -= params[idx].value();
                 //ifcb correction
-                if (_ifcb_model == IFCB_MODEL::COR && _frequency >= 3 && freq == FREQ_3)
+                if (_ifcb_model == IFCB_MODEL::COR && _frequency >= 3 && freq == FREQ_3
+                    && (_gallbias == nullptr || !_gallbias->has_phase_osb()))
                 {
                     tempL.l[0] += dynamic_cast<t_gprecisebias *>(_bias_model.get())->ifcbDelay(obsdata, nullptr, OBSCOMBIN::RAW_ALL);
                 }

@@ -28,6 +28,7 @@ namespace gnut
           _rtcm_end(2),
           _health(true),
           _dcb_correct_mark(false),
+          _phase_correct_mark(false),
           _bds_code_bias_mark(false),
           _range_smooth_mark(false)
     {
@@ -43,6 +44,7 @@ namespace gnut
           _rtcm_end(2),
           _health(true),
           _dcb_correct_mark(false),
+          _phase_correct_mark(false),
           _bds_code_bias_mark(false),
           _range_smooth_mark(false)
     {
@@ -56,6 +58,7 @@ namespace gnut
           _rtcm_end(2),
           _health(true),
           _dcb_correct_mark(false),
+          _phase_correct_mark(false),
           _bds_code_bias_mark(false),
           _range_smooth_mark(false),
           _satid(sat),
@@ -80,6 +83,7 @@ namespace gnut
           _rtcm_end(2),
           _health(true),
           _dcb_correct_mark(false),
+          _phase_correct_mark(false),
           _bds_code_bias_mark(false),
           _range_smooth_mark(false)
     {
@@ -98,6 +102,7 @@ namespace gnut
 #endif
         _gmutex.lock();
         _gobs[obs] = d;
+        _osb_corrected.erase(obs);
         _gmutex.unlock();
         return;
     }
@@ -251,6 +256,7 @@ namespace gnut
             _gslip.erase(obs);
         if (_gLevel.find(obs) != _gLevel.end())
             _gLevel.erase(obs);
+        _osb_corrected.erase(obs);
 
         _gmutex.unlock();
     }
@@ -281,7 +287,7 @@ namespace gnut
             return true;
          }
 
-        if (allbias->get_used_ac() == "SGG_A")
+        if (allbias->has_phase_osb())
             return apply_code_phase_bias(allbias);
         else
             return apply_dcb(allbias);
@@ -289,13 +295,7 @@ namespace gnut
 
     bool t_gobsgnss::apply_code_phase_bias(t_gallbias *allbias)
     {
-        double bias1 = 0.0;
-        double bias2 = 0.0;
-        double c1 = 0.0;
-        double c2 = 0.0;
-        double biasif = 0.0;
-        GOBSBAND b1, b2;
-        if (this->_dcb_correct_mark)
+        if (this->_dcb_correct_mark && this->_phase_correct_mark)
         {
             return true;
         }
@@ -306,43 +306,49 @@ namespace gnut
 
         for (GOBS obs_type : this->obs())
         {
-
             t_gobs gobs_type(obs_type);
-            gobs_type.gobs2to3(gsys);
-
-            if (t_gobs(obs_type).is_code())
-            {
-            }
-            else if (t_gobs(obs_type).is_phase())
-            {
-                if (obs_type == L1W)
-                {
-                    bias1 = allbias->get(gepo, gsat, gobs_type.gobs(), gobs_type.gobs(), "WHU_PHASE");
-                    b1 = t_gobs(obs_type).band();
-                }
-                else if (obs_type == L2W)
-                {
-                    bias2 = allbias->get(gepo, gsat, gobs_type.gobs(), gobs_type.gobs(), "WHU_PHASE");
-                    b2 = t_gobs(obs_type).band();
-                }
-            }
-            else
+            if (!gobs_type.is_code() && !gobs_type.is_phase())
             {
                 continue;
             }
 
-            // apply dcb to obsdata
-            double obs_value = this->getobs(gobs_type.gobs());
-            if (obs_type == L2W)
+            gobs_type.gobs2to3(gsys);
+            double bias = 0.0;
+            if (!allbias->get_osb(gepo, gsat, gobs_type.gobs(), bias))
             {
-                coef_ionofree(b1, c1, b2, c2);
-                biasif = c1 * bias1 + c2 * bias2;
-                std::cout << gsat << " " << t_gobs(obs_type).gobs() << " " << biasif << endl;
+                continue;
             }
-            this->resetobs(gobs_type.gobs(), obs_value);
+
+            double obs_value = this->getobs(obs_type);
+            if (t_gobs(obs_type).is_phase())
+            {
+                double wavelength = this->wavelength(t_gobs(obs_type).band());
+                if (double_eq(wavelength, 0.0))
+                {
+                    continue;
+                }
+                obs_value -= bias / wavelength;
+            }
+            else
+            {
+                obs_value -= bias;
+            }
+            this->resetobs(obs_type, obs_value);
+            _gmutex.lock();
+            this->_osb_corrected.insert(obs_type);
+            _gmutex.unlock();
         }
         this->_dcb_correct_mark = true;
+        this->_phase_correct_mark = true;
         return true;
+    }
+
+    bool t_gobsgnss::osb_corrected(const GOBS &obs) const
+    {
+        _gmutex.lock();
+        bool corrected = _osb_corrected.find(obs) != _osb_corrected.end();
+        _gmutex.unlock();
+        return corrected;
     }
 
     bool t_gobsgnss::apply_dcb(t_gallbias* allbias)
