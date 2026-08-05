@@ -54,8 +54,8 @@ namespace gfgo
     
 	//for GNSS
 	protected:
-		double _para_CRD[GWINDOW_SIZE][SIZE_CRD];                     ///<ECEF coordinate (XYZ) in sliding window
-		double _para_SPEED[GWINDOW_SIZE][SIZE_SPEED];                 ///<ECEF Velocity (Vx,Vy,Vz) in sliding window
+		double _para_CRD[GWINDOW_SIZE + 1][SIZE_CRD];                 ///<ECEF coordinate (XYZ) in sliding window
+		double _para_SPEED[GWINDOW_SIZE + 1][SIZE_SPEED];             ///<ECEF Velocity (Vx,Vy,Vz) in sliding window
 		double _para_amb[NUM_OF_ARC][SIZE_AMB];                    ///carrier-phase ambiguity arc tracked in sliding window 
 
 
@@ -66,7 +66,14 @@ namespace gfgo
 		double _para_ISB_GAL[GWINDOW_SIZE + 1][SIZE_ISB];				      ///GAL ISB in sliding window (random walk)
 		double _para_ISB_BDS[GWINDOW_SIZE + 1][SIZE_ISB];				      ///GAL ISB in sliding window (random walk)
 		double _para_ISB_GLO[GWINDOW_SIZE + 1][SIZE_ISB];				      ///GLO ISB in sliding window (random walk)
+		double _para_ISB_QZS[GWINDOW_SIZE + 1][SIZE_ISB];				      ///QZSS ISB in sliding window (random walk)
 		double _para_AMB_IF[NUM_OF_ARC][SIZE_AMB];					  ///IF carrier-phase ambiguity arc tracked in sliding window
+
+		// for PPP RAW_ALL:
+		// SION is a node/satellite state.  The first dimension is the sliding
+		// window node and the second dimension is the stable global satellite id.
+		double _para_AMB_RAW[NUM_OF_ARC][SIZE_AMB];					  ///per-frequency RAW carrier-phase ambiguity arcs
+		double _para_SION[GWINDOW_SIZE + 1][NUM_OF_ARC];				      ///slant ionosphere states per node and satellite
 	};
 }
 

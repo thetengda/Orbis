@@ -36,7 +36,7 @@ namespace gfgomsf
 		t_gambIF_manager(map<GSYS, map<FREQ_SEQ, GOBSBAND>> band_index);
 		~t_gambIF_manager();
 		void clearState();
-		void addNewSat(const t_gtime & cur_time, const int &rover_index, const int &sat_index, int &amb_index, const t_gsatdata &sat_data, t_gallpar params);
+		bool addNewSat(const t_gtime & cur_time, const int &rover_index, const int &sat_index, int &amb_index, const t_gsatdata &sat_data, t_gallpar params);
 		bool addAmb(const t_gtime & cur_time, vector<t_gpar> amb_para, const  GSYS & gnss_system, int rover_index, const int &sat_index, int &amb_index);
 		void addRover(string sat_name, const int &rover_index);
 		void addRover(double time, string sat_name, const int &rover_index);//add for MultiWindow

@@ -24,11 +24,14 @@
 
 
 #include "gfgognss/gambIF_manager.h"
+#include "gambfix/gambRAW_manager.h"
 #include "gfactor/initial_factor.h"
 #include "gfactor/carrierphase_IF_factor.h"
 #include "gfactor/pseudorange_IF_factor.h"
 #include "gfactor/multi_carrierphase_IF_factor.h"
 #include "gfactor/multi_pseudorange_IF_factor.h"
+#include "gfactor/pseudorange_RAW_factor.h"
+#include "gfactor/carrierphase_RAW_factor.h"
 #include "gfactor/random_walk_factor.h"
 
 #include <map>
@@ -75,6 +78,21 @@ namespace gfgomsf
 		virtual void publish_foat();
 		
 	protected:
+		using RAWEquMsg = gfgo::RAWEquMsg;
+
+		struct RawObsIndex
+		{
+			t_gtime time;
+			string sat;
+			string site;
+			GOBSTYPE obs_type = TYPE;
+			GOBS obs = GOBS::X;
+			FREQ_SEQ freq = FREQ_X;
+			int sat_global_id = -1;
+			int amb_index = -1;
+			int node = -1;
+		};
+
 		class DDEquMsg
 		{
 		public:
@@ -124,8 +142,13 @@ namespace gfgomsf
 		//for PPP IF:
 		vector<IFEquMsg> _IF_msg;
 		vector<vector<IFEquMsg>> _vIF_msg;
+		//for PPP RAW_ALL: each message contains exactly one selected code or phase observable
+		vector<RAWEquMsg> _RAW_msg;
+		vector<vector<RAWEquMsg>> _vRAW_msg;
 
 		vector<pair<pair<string, int>, pair<FREQ_SEQ, GOBSTYPE>>> _gnss_obs_index;
+		vector<RawObsIndex> _raw_obs_index;
+		int _raw_outlier_index = -1;
 		std::vector<PseudorangeDDFactor*> window_pseudo_factors;
 		std::vector<CarrierphaseDDFactor*> window_carrierphase_dd_factors;
 		int              _rover_count = -1;
@@ -136,11 +159,24 @@ namespace gfgomsf
 		std::set<std::string> _pending_ppp_slips;
 		std::set<std::string> _candidate_ppp_slips;
 		std::map<std::string, t_gtime> _last_ppp_phase_epoch;
+		// RAW continuity and ambiguity arcs are tracked independently per
+		// selected frequency.  Satellite IDs remain stable so SION addresses
+		// survive a single-frequency cycle slip.
+		std::map<std::string, std::set<FREQ_SEQ>> _pending_raw_slips;
+		std::map<std::string, std::map<FREQ_SEQ, GOBS>> _candidate_raw_phase_obs;
+		std::map<std::string, std::map<FREQ_SEQ, t_gtime>> _candidate_raw_phase_epoch;
+		std::map<std::string, std::map<FREQ_SEQ, GOBS>> _last_raw_phase_obs;
+		std::map<std::string, std::map<FREQ_SEQ, t_gtime>> _last_raw_phase_epoch;
+		// SION initial factors are attached only to a genuinely new satellite
+		// node, not merely because that node became index zero after sliding.
+		std::set<int> _raw_sion_initial_nodes[GWINDOW_SIZE + 1];
 		double           _loss_func_value = 3;
 		double           _gtime_interval = 1.0;
 		shared_ptr<t_gamb_manager>  _amb_manager;
 		//for PPP IF:
 		shared_ptr<t_gambIF_manager>  _ambIF_manager;
+		//for PPP RAW_ALL:
+		shared_ptr<t_gambRAW_manager> _ambRAW_manager;
 		Eigen::Vector3d        _Pos[GWINDOW_SIZE + 1];							///< position of rover
 		Eigen::Vector3d        _Vel[GWINDOW_SIZE + 1];
 
@@ -150,14 +186,17 @@ namespace gfgomsf
 		double _isb_GAL_ini = 0.0;
 		double _isb_BDS_ini = 0.0;
 		double _isb_GLO_ini = 0.0;
+		double _isb_QZS_ini = 0.0;
 		double _clk[GWINDOW_SIZE + 1];
 		double _trp[GWINDOW_SIZE + 1];
 		double _isb_GAL[GWINDOW_SIZE + 1];
 		double _isb_BDS[GWINDOW_SIZE + 1];
 		double _isb_GLO[GWINDOW_SIZE + 1];
+		double _isb_QZS[GWINDOW_SIZE + 1];
 		bool _lost_isb_GAL[GWINDOW_SIZE + 1];
 		bool _lost_isb_BDS[GWINDOW_SIZE + 1];
 		bool _lost_isb_GLO[GWINDOW_SIZE + 1];
+		bool _lost_isb_QZS[GWINDOW_SIZE + 1];
 
 		ofstream _output_float_solution;//add for MultiWindow
 		ofstream _output_estimator_info;//add for MultiWindow
@@ -236,6 +275,8 @@ namespace gfgomsf
 		 * Chooses highest elevation satellite as reference and creates double-difference pairs with other satellites for all GNSS systems and frequencies
 		 */
 		int _combine_IF();
+		/** Generate one raw equation for every available code/phase observable. */
+		int _combine_RAW();
 
 		void _select_ref_sat();	
 		/**
@@ -295,6 +336,7 @@ namespace gfgomsf
 		virtual int _optimization();
 
 		virtual int _optimization_PPP();
+		int _optimization_PPP_RAW();
 		/**
 		 * @brief Roll back a rejected pure-PPP candidate epoch
 		 *
@@ -323,6 +365,7 @@ namespace gfgomsf
 
 
 		void _marginalization_PPP();
+		void _marginalization_PPP_RAW();
 		/**
 		 * @brief Detect GNSS observation outliers using normalized residuals
 		 * Identifies and flags satellites with excessive residuals for removal
@@ -347,6 +390,7 @@ namespace gfgomsf
 		void _posteriori_test(ceres::Problem &problem);
 		//void _posteriori_test_PPP(ceres::Problem& problem);
 		void _posteriori_test_PPP(ceres::Problem & problem);
+		void _posteriori_test_PPP_RAW(ceres::Problem & problem);
 	};
 }
 #endif

@@ -102,8 +102,8 @@ namespace gnut
         IONO_FREE,
         RAW_SINGLE,    ///< nonsupport
         RAW_DOUBLE,    ///< nonsupport
-        RAW_ALL,
-        RAW_MIX
+        RAW_ALL,       ///< uncombined code/phase observations; supported by PPP FGO
+        RAW_MIX        ///< mixed single-/dual-frequency raw processing; PPP FGO currently rejects this mode explicitly
     };
 
     enum class ATTITUDES

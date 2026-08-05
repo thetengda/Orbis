@@ -1,5 +1,5 @@
-﻿#Minimum requirement of CMake version : 3.5
-cmake_minimum_required(VERSION 3.5)
+# CONFIGURE_DEPENDS source discovery requires CMake 3.12 or newer.
+cmake_minimum_required(VERSION 3.12)
 
 #Project name and version number
 project(${LibGREAT} VERSION 0.1.0)
@@ -55,11 +55,13 @@ message(STATUS " include path for ${LibGPP} is : ${Third_Eigen_ROOT}")
 message(STATUS " include path for ${LibGREAT} is : ${LibGREATSrc}")
 #message(STATUS "                                                                     ")
 
-# for all the header files and source_files
-file(GLOB_RECURSE header_files ${PROJECT_SOURCE_DIR} *.h *.hpp)
-file(GLOB_RECURSE source_files ${PROJECT_SOURCE_DIR} *.cpp)
-file(GLOB_RECURSE header_files ${PROJECT_SOURCE_DIR} *.h *.hpp)
-file(GLOB_RECURSE source_files ${PROJECT_SOURCE_DIR} *.cpp)
+# for all the header files and source files.  CONFIGURE_DEPENDS makes a
+# subsequent build re-run CMake when a new RAW factor/manager source is
+# added to the tree.
+file(GLOB_RECURSE header_files CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/*.h" "${PROJECT_SOURCE_DIR}/*.hpp")
+file(GLOB_RECURSE source_files CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/*.cpp")
 
 # grouping
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")

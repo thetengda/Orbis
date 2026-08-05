@@ -26,7 +26,7 @@ void gfgomsf::t_gambIF_manager::clearState()
 	search_index_IF.clear();
 }
 
-void gfgomsf::t_gambIF_manager::addNewSat(const t_gtime & cur_time, const int &rover_index, const int &sat_index, int &amb_index, const t_gsatdata &sat_data, t_gallpar params)
+bool gfgomsf::t_gambIF_manager::addNewSat(const t_gtime & cur_time, const int &rover_index, const int &sat_index, int &amb_index, const t_gsatdata &sat_data, t_gallpar params)
 {
 	string sat_name = sat_data.sat();
 	GSYS gnss_system = sat_data.gsys();
@@ -45,7 +45,11 @@ void gfgomsf::t_gambIF_manager::addNewSat(const t_gtime & cur_time, const int &r
 	//shared_ptr<t_gsat_map> cur_sat(new t_gsat_map(gnss_system, sat_name, sat_index));//delete for MultiWindow
 	shared_ptr<t_gsat_map> cur_sat(new t_gsat_map(gnss_system, sat_name, obs_time.sow(), sat_index));//add for MultiWindow
 	_sat_map[sat_index] = cur_sat;
-	addAmb(cur_time, amb_para_per_sat, gnss_system, rover_index, sat_index, amb_index);
+	const bool added = addAmb(cur_time, amb_para_per_sat, gnss_system,
+		rover_index, sat_index, amb_index);
+	if (!added)
+		_sat_map.erase(sat_index);
+	return added;
 }
 
 // bool gfgomsf::t_gambIF_manager::addAmb(const t_gtime & cur_time, vector<t_gpar> amb_para, const GSYS & gnss_system, int rover_index, const int & sat_index, int & amb_index)
@@ -83,21 +87,31 @@ bool gfgomsf::t_gambIF_manager::addAmb(const t_gtime& cur_time,
 									   const int& sat_index,
 									   int& amb_index)
 {
-	map<FREQ_SEQ, GOBSBAND> crt_bands = _band_index[gnss_system];
-
 	if (amb_para.empty())
 	{
 		cout << "sat id " << sat_index << " has no amb para!!!" << endl;
 		return false;
 	}
+	auto sat_it = _sat_map.find(sat_index);
+	if (sat_it == _sat_map.end() || !sat_it->second)
+		return false;
+	auto bands_it = _band_index.find(gnss_system);
+	if (bands_it == _band_index.end())
+		return false;
+	const map<FREQ_SEQ, GOBSBAND> &crt_bands = bands_it->second;
+	auto f1 = crt_bands.find(FREQ_1);
+	auto f2 = crt_bands.find(FREQ_2);
+	if (f1 == crt_bands.end() || f2 == crt_bands.end() ||
+		f1->second == BAND || f2->second == BAND)
+		return false;
 
 	string sat_name = amb_para[0].prn;
 
 	for (int i = 0; i < amb_para.size(); i++)
 	{
 		amb_index++;
-		pair<FREQ_SEQ, GOBSBAND> freq_band1 = make_pair(FREQ_1, crt_bands[FREQ_1]);
-		pair<FREQ_SEQ, GOBSBAND> freq_band2 = make_pair(FREQ_2, crt_bands[FREQ_2]);
+		pair<FREQ_SEQ, GOBSBAND> freq_band1 = make_pair(FREQ_1, f1->second);
+		pair<FREQ_SEQ, GOBSBAND> freq_band2 = make_pair(FREQ_2, f2->second);
 		double if_amb_value = amb_para[i].value();
 
 		shared_ptr<t_gambIF_per_ID> amb_i(
@@ -106,8 +120,9 @@ bool gfgomsf::t_gambIF_manager::addAmb(const t_gtime& cur_time,
 								rover_index, if_amb_value));
 
 		amb_i->setBeg(cur_time);
+		amb_i->setEnd(LAST_TIME);
 		_ambiguityIF[amb_index] = amb_i;
-		_sat_map[sat_index]->_amb_ids.push_back(amb_index);
+		sat_it->second->_amb_ids.push_back(amb_index);
 		ambiguity_ids.push_back(amb_index);
 	}
 
@@ -241,7 +256,7 @@ void gfgomsf::t_gambIF_manager::removeSat(const int &sat_global_id, const int &r
 		}//for (int i = 0; i < sat_map->_amb_ids.size(); i++)
 		if (is_new_sat)
 			_sat_map.erase(sat_global_id);
-		else//add for MultiWindow
+		else if (!it->second->time_span.empty())//add for MultiWindow
 		{
 			it->second->time_span.pop_back();
 		}
@@ -250,6 +265,9 @@ void gfgomsf::t_gambIF_manager::removeSat(const int &sat_global_id, const int &r
 
 void gfgomsf::t_gambIF_manager::addGpara(t_gallpar & params, const int & idx, double value)
 {
+	if (params.parNumber() <= 0)
+		return;
+
 	for (auto it : _ambiguityIF)
 	{
 		if (it.first == idx)

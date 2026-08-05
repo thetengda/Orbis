@@ -10,11 +10,15 @@
  */
 
 #include "gpvtfgo.h"
+#include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <stdexcept>
 #include "gmodels/gprecisebiasGPP.h"
 #include "gfactor/ginitial_pose_factor.h"
+#include "gfactor/raw_factor_common.h"
 #include <gutils/gcommon.cpp>
+#include "gutils/gfileconv.h"
 
 namespace
 {
@@ -40,6 +44,32 @@ t_gfgo_para(gset) {
 	/*t_gbiasmodel *precise_bias(new t_gprecisebiasGPP(_allproc, _spdlog, gset));
 	_gbias_model = precise_bias;*/
 	_gbias_model = new t_gprecisebiasFGO(_allproc, _spdlog, gset);
+	if (!_isBase && _spdlog)
+	{
+		if (_observ == OBSCOMBIN::RAW_ALL)
+		{
+			_spdlog->info(
+				"PPP FGO observation mode RAW_ALL: one code/phase equation per "
+				"selected frequency, SION per satellite, and per-frequency ambiguities");
+			if (_fix_mode != FIX_MODE::NO)
+				_spdlog->info(
+					"PPP FGO RAW_ALL ambiguity fixing uses the FGO posterior "
+					"equation and the legacy WL/NL ambiguity resolver; fixed "
+					"constraints are not fed back into the FGO graph");
+		}
+		else if (_observ == OBSCOMBIN::RAW_MIX)
+		{
+			_spdlog->warn(
+				"PPP FGO observation mode RAW_MIX is parsed but currently unsupported; "
+				"use IONO_FREE or RAW_ALL");
+		}
+	}
+	if (!_isBase && _observ == OBSCOMBIN::RAW_ALL)
+	{
+		t_gsetproc *proc_setting = dynamic_cast<t_gsetproc *>(gset);
+		if (proc_setting && proc_setting->ion_model() == IONMODEL::VION)
+			throw std::logic_error("FGO PPP RAW_ALL does not support VION; use SION or the default ionosphere model");
+	}
 	for (int i = 0; i <= gwindow_size; i++)
 	{
 		_Pos[i].setZero();
@@ -52,13 +82,16 @@ t_gfgo_para(gset) {
 			_isb_GAL[i] = 0.0;
 			_isb_BDS[i] = 0.0;
 			_isb_GLO[i] = 0.0;
+			_isb_QZS[i] = 0.0;
 			_lost_isb_GAL[i] = false;
 			_lost_isb_BDS[i] = false;
 			_lost_isb_GLO[i] = false;
+			_lost_isb_QZS[i] = false;
 		}
 		_headers[i]=0.0;
 		_rover_window[i] = nullptr;
-		_para_window->delAllParam();
+		_para_window[i].delAllParam();
+		_raw_sion_initial_nodes[i].clear();
 	}
 	_win_base_data.resize(gwindow_size+1);
 	cur_sat_prn.clear();
@@ -66,12 +99,16 @@ t_gfgo_para(gset) {
 	_DD_msg.clear();
 	_vDD_msg.clear();
 	//add zhang
-	if (!_isBase)//for PPP IF
+	if (!_isBase)//for PPP IF/RAW_ALL
 	{
 		_IF_msg.clear();
 		_vIF_msg.clear();
+		_RAW_msg.clear();
+		_vRAW_msg.clear();
 		shared_ptr<t_gambIF_manager> ambIF_m(new t_gambIF_manager(_band_index));
 		_ambIF_manager = ambIF_m;
+		shared_ptr<t_gambRAW_manager> ambRAW_m(new t_gambRAW_manager(_band_index));
+		_ambRAW_manager = ambRAW_m;
 	}
 	else
 	{
@@ -102,10 +139,23 @@ t_gfgo_para(gset) {
 
 
 
-	//调试信息
-	string _output_path = ".";
-	string o_path = _output_path + "/GREAT_FGO_FLOAT.txt";
-	_output_float_solution.open(o_path, ofstream::out);
+	string o_path;
+	if (auto output = dynamic_cast<t_gsetout *>(gset))
+	{
+		o_path = output->outputs("fgo");
+		if (!o_path.empty())
+		{
+			substitute(o_path, "$(rec)", _site, false);
+			if (o_path.compare(0, string(GFILE_PREFIX).size(), GFILE_PREFIX) == 0)
+				o_path.erase(0, string(GFILE_PREFIX).size());
+			make_path(o_path);
+			_output_float_solution.open(
+				o_path,
+				output->append() ? (ofstream::out | ofstream::app) : ofstream::out);
+		}
+	}
+	if (o_path.empty() && _spdlog)
+		_spdlog->warn("PPP FGO output <fgo> is not configured; solution stream is disabled");
 	if (_output_float_solution.good()) {
 		_output_float_solution << "#FACTOR GRAPH OPTIMIZATION BASED GNSS SOLUTION" << endl;
 		//_output_float_solution << "#" << "ambiguity propogation: " << dynamic_cast<t_gsetfgo*>(gset)->_amb_propagation() << endl;
@@ -323,6 +373,17 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 		return -1;
 	}
 	_get_initial_value(runEpoch); //for current epoch
+	if (_data.size() < _minsat)
+	{
+		if (_spdlog)
+			SPDLOG_LOGGER_ERROR(_spdlog, string("gpvtfgo "),
+				("Not enough usable satellites after ambiguity initialization!"));
+		if (_isBase)
+			clearWindow();
+		else
+			_rollback_current_ppp_node();
+		return -1;
+	}
 	// ??????  necessary
 	if (_data.size() < 6)
 	{
@@ -337,9 +398,15 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 		clearWindow();
 		return -1;
 	}
-	if (!_isBase && _combine_IF() < 0)
+	if (!_isBase && _observ == OBSCOMBIN::RAW_MIX)
 	{
-		std::cout << "Epoch: " << runEpoch.sow() << " combine IF wrong!!!" << endl;
+		if (_spdlog) SPDLOG_LOGGER_ERROR(_spdlog, "RAW_MIX is not supported by the FGO PPP graph");
+		_rollback_current_ppp_node();
+		return -1;
+	}
+	if (!_isBase && ((_observ == OBSCOMBIN::RAW_ALL) ? _combine_RAW() : _combine_IF()) < 0)
+	{
+		std::cout << "Epoch: " << runEpoch.sow() << " combine PPP observations wrong!!!" << endl;
 		_rollback_current_ppp_node();
 		return -1;
 	}
@@ -372,10 +439,14 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 	if (_last_gnss_info->valid)
 	{
 		publish_foat();
-		//if(_isBase) {
-			_pre_amb_resolution();
+		// RAW_ALL and IONO_FREE both use the solved FGO posterior as the
+		// input to the existing WL/NL ambiguity resolver.  As in the IF path,
+		// this produces the conditional fixed solution for the FLT output;
+		// it does not add integer constraints back to the Ceres graph.
+		if (_pre_amb_resolution())
 			_amb_resolution();
-		//}
+		else
+			_amb_state = false;
 	}
 	else
 	{
@@ -407,6 +478,9 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 
 void gfgomsf::t_gpvtfgo::clearWindow()
 {
+	for (int i = 0; i <= gwindow_size; ++i)
+		_raw_sion_initial_nodes[i].clear();
+
     for (int i = 0; i <= _rover_count; i++)
     {
     	_headers[i]=0.0;
@@ -415,12 +489,14 @@ void gfgomsf::t_gpvtfgo::clearWindow()
     	{
     		_clk[i] = 0.0;
     		_trp[i] = 0.0;
-    		_isb_GAL[i] = 0.0;
-    		_isb_BDS[i] = 0.0;
+			_isb_GAL[i] = 0.0;
+			_isb_BDS[i] = 0.0;
 			_isb_GLO[i] = 0.0;
-    		_lost_isb_GAL[i] = false;
-    		_lost_isb_BDS[i] = false;
+			_isb_QZS[i] = 0.0;
+			_lost_isb_GAL[i] = false;
+			_lost_isb_BDS[i] = false;
 			_lost_isb_GLO[i] = false;
+			_lost_isb_QZS[i] = false;
     	}
 		if (_rover_window[i] != nullptr)
 			delete _rover_window[i];
@@ -446,6 +522,10 @@ void gfgomsf::t_gpvtfgo::clearWindow()
 	{
 		_IF_msg.clear();
 		_vIF_msg.clear();
+		_RAW_msg.clear();
+		_vRAW_msg.clear();
+		_raw_obs_index.clear();
+		_raw_outlier_index = -1;
 	}
 	if (_isBase)
 	{
@@ -454,9 +534,15 @@ void gfgomsf::t_gpvtfgo::clearWindow()
 	else
 	{
 		_ambIF_manager->clearState();
+		_ambRAW_manager->clearState();
 		_pending_ppp_slips.clear();
 		_candidate_ppp_slips.clear();
 		_last_ppp_phase_epoch.clear();
+		_pending_raw_slips.clear();
+		_candidate_raw_phase_obs.clear();
+		_candidate_raw_phase_epoch.clear();
+		_last_raw_phase_obs.clear();
+		_last_raw_phase_epoch.clear();
 	}
 	_rover_count = -1;
     _global_sat_id = -1;
@@ -474,7 +560,10 @@ void gfgomsf::t_gpvtfgo::clearWindow()
 		memset(_para_ISB_GAL, 0, sizeof(_para_ISB_GAL));
 		memset(_para_ISB_BDS, 0, sizeof(_para_ISB_BDS));
 		memset(_para_ISB_GLO, 0, sizeof(_para_ISB_GLO));
+		memset(_para_ISB_QZS, 0, sizeof(_para_ISB_QZS));
 		memset(_para_AMB_IF, 0, sizeof(_para_AMB_IF));
+		memset(_para_AMB_RAW, 0, sizeof(_para_AMB_RAW));
+		memset(_para_SION, 0, sizeof(_para_SION));
 	}
 }
 
@@ -997,6 +1086,21 @@ void gfgomsf::t_gpvtfgo::_set_initial_value(const t_gtime& runEpoch)
 			_isb_GLO[_rover_count] = 0.0;
 		}
 
+		id = _param.getParam(_site, par_type::QZS_ISB, "");
+		if (id >= 0)
+		{
+			_lost_isb_QZS[_rover_count] = false;
+			if (_rover_count > 0)
+				_isb_QZS[_rover_count] = _isb_QZS[_rover_count - 1];
+			else
+				_isb_QZS[_rover_count] = _param[id].value();
+		}
+		else
+		{
+			_lost_isb_QZS[_rover_count] = true;
+			_isb_QZS[_rover_count] = 0.0;
+		}
+
         //save the ini value
         double epsilon = 1e-10;
         if (fabs(_trp_ini) < epsilon)
@@ -1014,6 +1118,10 @@ void gfgomsf::t_gpvtfgo::_set_initial_value(const t_gtime& runEpoch)
 		if (fabs(_isb_GLO_ini) < epsilon && !_lost_isb_GLO[_rover_count])
 		{
 			_isb_GLO_ini = _isb_GLO[_rover_count];
+		}
+		if (fabs(_isb_QZS_ini) < epsilon && !_lost_isb_QZS[_rover_count])
+		{
+			_isb_QZS_ini = _isb_QZS[_rover_count];
 		}
     }
     _headers[_rover_count] = runEpoch.sow();
@@ -1037,6 +1145,7 @@ void gfgomsf::t_gpvtfgo::_set_initial_value(const t_gtime& runEpoch)
     }
     if (_isBase)
     {
+        set<string> failed_sats;
         for (auto it : _data)
         {
             string sat_name = it.sat();
@@ -1044,7 +1153,15 @@ void gfgomsf::t_gpvtfgo::_set_initial_value(const t_gtime& runEpoch)
             {
                 //new sat
                 _global_sat_id++;
-                _amb_manager->addNewSat(runEpoch, _rover_count, _global_sat_id, _global_amb_id, it, _param);
+                if (!_amb_manager->addNewSat(runEpoch, _rover_count,
+                        _global_sat_id, _global_amb_id, it, _param))
+                {
+                    failed_sats.insert(sat_name);
+                    if (_spdlog)
+                        _spdlog->warn(
+                            "PPP FGO base: no ambiguity arc for {}; "
+                            "dropping it from this epoch", sat_name);
+                }
             }
             else
             {
@@ -1071,7 +1188,16 @@ void gfgomsf::t_gpvtfgo::_set_initial_value(const t_gtime& runEpoch)
                     {
                         // slip occured
                         _global_sat_id++;
-                        _amb_manager->addNewSat(runEpoch, _rover_count, _global_sat_id, _global_amb_id, it, _param);
+                        if (!_amb_manager->addNewSat(runEpoch, _rover_count,
+                                _global_sat_id, _global_amb_id, it, _param))
+                        {
+                            failed_sats.insert(sat_name);
+                            if (_spdlog)
+                                _spdlog->warn(
+                                    "PPP FGO base: unable to reset ambiguity "
+                                    "arc for {}; dropping it from this epoch",
+                                    sat_name);
+                        }
                         is_slip = true;
                         break;
                     }
@@ -1083,38 +1209,192 @@ void gfgomsf::t_gpvtfgo::_set_initial_value(const t_gtime& runEpoch)
                 }
             }
         }
+		_data.erase(remove_if(_data.begin(), _data.end(),
+			[&failed_sats](const t_gsatdata &sat)
+			{
+				return failed_sats.count(sat.sat()) != 0;
+			}), _data.end());
         _amb_manager->get_last_epoch_sats(_epoch.sow());
         assert(_amb_manager->cur_sats.size() == _data.size());
     }
-    else
+	else
     {
-		for (const auto& sat_data : _data)
+		if (_observ == OBSCOMBIN::RAW_ALL)
 		{
-			const string sat_name = sat_data.sat();
-			const bool was_tracking =
-				_ambIF_manager->is_sat_tracking(sat_name);
-			const bool force_new_arc =
-				_pending_ppp_slips.find(sat_name) !=
-				_pending_ppp_slips.end();
-
-			if (!was_tracking || force_new_arc)
+			t_gallpar raw_ambiguity_params;
+			if (_phase)
+				raw_ambiguity_params = _param;
+			for (const auto& sat_data : _data)
 			{
-				_global_sat_id++;
-				_ambIF_manager->addNewSat(
-					runEpoch, _rover_count, _global_sat_id,
-					_global_amb_id, sat_data, _param);
+				const string sat_name = sat_data.sat();
+				const bool was_tracking = _ambRAW_manager->is_sat_tracking(sat_name);
+				const auto pending_raw_slip = _pending_raw_slips.find(sat_name);
+				int sat_id = was_tracking
+					? _ambRAW_manager->get_sat_id(sat_name)
+					: -1;
 
-				if (force_new_arc)
-					_candidate_ppp_slips.insert(sat_name);
+				if (!was_tracking)
+				{
+					_global_sat_id++;
+					sat_id = _global_sat_id;
+					const int old_amb_id = _global_amb_id;
+					_ambRAW_manager->addNewSat(runEpoch, _rover_count, sat_id,
+						_global_amb_id, sat_data, raw_ambiguity_params);
+					if (_rover_count >= 0 && sat_id < NUM_OF_ARC)
+						_raw_sion_initial_nodes[_rover_count].insert(sat_id);
+					for (int amb_id = old_amb_id + 1;
+						 amb_id <= _global_amb_id && amb_id < NUM_OF_ARC; ++amb_id)
+						_para_AMB_RAW[amb_id][0] = _ambRAW_manager->getInitialAmb(amb_id);
+					if (pending_raw_slip != _pending_raw_slips.end())
+						_candidate_ppp_slips.insert(sat_name);
+				}
+				else
+				{
+					if (sat_id < 0)
+						sat_id = _ambRAW_manager->getLatestSatId(sat_name);
+					if (sat_id < 0)
+						continue;
+
+					// Retire only the frequency arcs reported by the RAW slip
+					// tracker.  The satellite ID and all unaffected arcs remain
+					// continuous, including the SION state.
+					if (pending_raw_slip != _pending_raw_slips.end())
+					{
+						const int old_amb_id = _global_amb_id;
+						for (const FREQ_SEQ freq : pending_raw_slip->second)
+						{
+							if (!_ambRAW_manager->resetFrequencyArc(
+								runEpoch, _rover_count, sat_id, freq,
+								_global_amb_id, _param) && _spdlog)
+								_spdlog->warn(
+									"PPP FGO RAW: unable to create replacement ambiguity "
+									"arc for {} F{}; keeping the previous arc state",
+									sat_name, static_cast<int>(freq));
+						}
+						for (int amb_id = old_amb_id + 1;
+							 amb_id <= _global_amb_id && amb_id < NUM_OF_ARC; ++amb_id)
+							_para_AMB_RAW[amb_id][0] = _ambRAW_manager->getInitialAmb(amb_id);
+						_candidate_ppp_slips.insert(sat_name);
+					}
+				}
+
+				// A code-only satellite may acquire a valid carrier later.  Create
+				// only the missing frequency arcs in that case; no satellite-level
+				// reset or SION reinitialization is needed.
+				if (_phase && sat_id >= 0)
+				{
+                    auto *gnss_setting = dynamic_cast<t_gsetgnss *>(_set);
+					if (gnss_setting)
+					{
+						const vector<GOBSBAND> bands = gnss_setting->band(sat_data.gsys());
+						const int frequency_count =
+							(std::min)(5, bands.empty() ? 5 : static_cast<int>(bands.size()));
+						for (int frequency_number = 1;
+							 frequency_number <= frequency_count && frequency_number <= _frequency;
+							 ++frequency_number)
+						{
+							const FREQ_SEQ frequency =
+								static_cast<FREQ_SEQ>(frequency_number);
+							const GOBSBAND band =
+								bands.size() >= static_cast<size_t>(frequency_number)
+									? bands[frequency_number - 1]
+									: t_gsys::band_priority(sat_data.gsys(), frequency);
+							const t_gobs phase_obs(sat_data.select_phase(band, true));
+							if (phase_obs.gobs() == GOBS::X ||
+								double_eq(sat_data.obs_L(phase_obs), 0.0) ||
+								_ambRAW_manager->hasActiveArc(sat_id, frequency))
+								continue;
+
+							const int old_amb_id = _global_amb_id;
+							if (!_ambRAW_manager->resetFrequencyArc(
+								runEpoch, _rover_count, sat_id, frequency,
+								_global_amb_id, _param))
+							{
+								if (_spdlog)
+									_spdlog->warn(
+										"PPP FGO RAW: no ambiguity parameter for {} F{}; "
+										"phase arc was not created",
+										sat_name, frequency_number);
+							}
+							for (int amb_id = old_amb_id + 1;
+								 amb_id <= _global_amb_id && amb_id < NUM_OF_ARC; ++amb_id)
+								_para_AMB_RAW[amb_id][0] = _ambRAW_manager->getInitialAmb(amb_id);
+						}
+					}
+				}
+				_ambRAW_manager->addRover(_epoch.sow(), sat_name, _rover_count);
+
+				double sion = 0.0;
+				if (was_tracking && _rover_count > 0 && sat_id >= 0 && sat_id < NUM_OF_ARC)
+					sion = _para_SION[_rover_count - 1][sat_id];
+				else
+				{
+					const int sion_id = _param.getParam(_site, par_type::SION, sat_name);
+					if (sion_id >= 0)
+						sion = _param[sion_id].value();
+				}
+				if (sat_id >= 0 && sat_id < NUM_OF_ARC)
+					_para_SION[_rover_count][sat_id] = sion;
+				int sion_id = _para_window[_rover_count].getParam(_site, par_type::SION, sat_name);
+				if (sion_id < 0)
+				{
+					t_gpar sion_par(_site, par_type::SION, _para_window[_rover_count].parNumber() + 1, sat_name);
+					sion_par.value(sion);
+					sion_par.apriori(sion);
+					sion_par.setTime(runEpoch, LAST_TIME);
+					_para_window[_rover_count].addParam(sion_par);
+					_para_window[_rover_count].reIndex();
+				}
+				else
+					_para_window[_rover_count][sion_id].value(sion);
 			}
-			else
-			{
-				_ambIF_manager->addRover(
-					_epoch.sow(), sat_name, _rover_count);
-			}
+			_ambRAW_manager->get_last_epoch_sats(_epoch.sow());
+			_ambRAW_manager->generateAmbSearchIndex();
+			assert(_ambRAW_manager->cur_sats.size() == _data.size());
 		}
-        _ambIF_manager->get_last_epoch_sats(_epoch.sow());
-        assert(_ambIF_manager->cur_sats.size() == _data.size());
+		else
+		{
+			set<string> failed_sats;
+			for (const auto& sat_data : _data)
+			{
+				const string sat_name = sat_data.sat();
+				const bool was_tracking =
+					_ambIF_manager->is_sat_tracking(sat_name);
+				const bool force_new_arc =
+					_pending_ppp_slips.find(sat_name) !=
+					_pending_ppp_slips.end();
+
+				if (!was_tracking || force_new_arc)
+				{
+					_global_sat_id++;
+					if (!_ambIF_manager->addNewSat(
+						runEpoch, _rover_count, _global_sat_id,
+						_global_amb_id, sat_data, _param))
+					{
+						failed_sats.insert(sat_name);
+						if (_spdlog)
+							_spdlog->warn(
+								"PPP FGO IF: no ambiguity arc for {}; "
+								"dropping it from this epoch", sat_name);
+					}
+
+					if (force_new_arc)
+						_candidate_ppp_slips.insert(sat_name);
+				}
+				else
+				{
+					_ambIF_manager->addRover(
+						_epoch.sow(), sat_name, _rover_count);
+				}
+			}
+			_data.erase(remove_if(_data.begin(), _data.end(),
+				[&failed_sats](const t_gsatdata &sat)
+				{
+					return failed_sats.count(sat.sat()) != 0;
+				}), _data.end());
+            _ambIF_manager->get_last_epoch_sats(_epoch.sow());
+            assert(_ambIF_manager->cur_sats.size() == _data.size());
+		}
     }
 }
 bool gfgomsf::t_gpvtfgo::_gtemp_params(t_gallpar & params, t_gallpar & params_temp)
@@ -1231,6 +1511,113 @@ int gfgomsf::t_gpvtfgo::_combine_IF()
     }
 }
 
+int gfgomsf::t_gpvtfgo::_combine_RAW()
+{
+    if (_isBase || _observ != OBSCOMBIN::RAW_ALL || !_ambRAW_manager)
+        return -1;
+
+    _RAW_msg.clear();
+	_crt_ele.clear();
+	_crt_SNR.clear();
+    const bool require_osb = (_upd_mode == UPD_MODE::OSB);
+	int skipped_osb_observations = 0;
+
+    for (auto &sat_data : _data)
+    {
+        sat_data.apply_bias(_gallbias);
+		_crt_ele[sat_data.sat()] = sat_data.ele_deg();
+        const GSYS system = sat_data.gsys();
+        const auto band_map_it = _band_index.find(system);
+        if (band_map_it == _band_index.end())
+            continue;
+
+        int max_freq = static_cast<int>(_frequency);
+        if (max_freq > 5)
+            max_freq = 5;
+        const int sat_global_id = _ambRAW_manager->get_sat_id(sat_data.sat());
+        if (sat_global_id < 0)
+            continue;
+
+        for (int f = 1; f <= max_freq; ++f)
+        {
+            const FREQ_SEQ freq = static_cast<FREQ_SEQ>(f);
+            const auto band_it = band_map_it->second.find(freq);
+            if (band_it == band_map_it->second.end() || band_it->second == BAND)
+                continue;
+
+            const GOBSBAND band = band_it->second;
+            const GOBS code = sat_data.select_range(band, true);
+            const GOBS phase = sat_data.select_phase(band, true);
+			if (phase != GOBS::X)
+			{
+				double snr = sat_data.getobs(pha2snr(phase));
+				if (double_eq(snr, 0.0) && code != GOBS::X)
+				{
+					string snr_observation = gobs2str(code);
+					if (!snr_observation.empty())
+					{
+						snr_observation[0] = 'S';
+						snr = sat_data.getobs(str2gobs(snr_observation));
+					}
+				}
+				_crt_SNR[sat_data.sat()][freq] = snr;
+			}
+
+            auto append_message = [&](const GOBS &obs, const GOBSTYPE &type)
+            {
+                if (type == TYPE_L && !_phase)
+                    return;
+                if (obs == GOBS::X || double_eq(sat_data.getobs(obs), 0.0))
+                    return;
+                if (require_osb && !sat_data.osb_corrected(obs))
+				{
+					++skipped_osb_observations;
+                    return;
+                }
+
+                RAWEquMsg message;
+                message.time = sat_data.epoch();
+                message.satdata = sat_data;
+                message.obs_type = type;
+                message.obs = obs;
+                message.freq = freq;
+                message.band = band;
+                message.site = _site;
+                message.sat_id = sat_data.sat();
+                message.sat_global_id = sat_global_id;
+                message.ion_id = t_gambRAW_manager::ionosphereKey(message.sat_id, _rover_count);
+                if (type == TYPE_L)
+                {
+                    message.amb_index = _ambRAW_manager->getAmbSearchIndex(make_pair(sat_global_id, freq));
+                    if (message.amb_index < 0)
+                        return;
+                    message.amb_id = t_gambRAW_manager::ambiguityKey(message.sat_id, freq, message.amb_index);
+                }
+                _RAW_msg.push_back(message);
+            };
+
+            append_message(code, TYPE_C);
+            append_message(phase, TYPE_L);
+        }
+
+        _combineMW(sat_data);
+    }
+
+	if (skipped_osb_observations > 0 && _spdlog)
+	{
+		_spdlog->warn(
+			"RAW_ALL OSB mode skipped {} code/phase observable(s) without "
+			"an OSB correction; the remaining observations are retained",
+			skipped_osb_observations);
+	}
+
+    if (_RAW_msg.empty())
+        return -1;
+
+    _vRAW_msg.push_back(_RAW_msg);
+    return 1;
+}
+
 void gfgomsf::t_gpvtfgo::_prior_factor(ceres::Problem & problem)
 {
 	//prior
@@ -1261,11 +1648,22 @@ void gfgomsf::t_gpvtfgo::_double_to_vector()
 	}
 	else
 	{
-		for (int i = 0; i < _ambIF_manager->ambiguity_ids.size(); i++)
+		if (_observ == OBSCOMBIN::RAW_ALL)
 		{
-			int amb_id = _ambIF_manager->ambiguity_ids[i];
-			_ambIF_manager->updateAmb(amb_id, _para_AMB_IF[amb_id][0]);
-			//cout << amb_id <<": "<< _para_amb[amb_id][0] << "   " ;
+			for (int amb_id : _ambRAW_manager->ambiguity_ids)
+			{
+				if (amb_id >= 0 && amb_id < NUM_OF_ARC)
+					_ambRAW_manager->updateAmb(amb_id, _para_AMB_RAW[amb_id][0]);
+			}
+		}
+		else
+		{
+			for (int i = 0; i < _ambIF_manager->ambiguity_ids.size(); i++)
+			{
+				int amb_id = _ambIF_manager->ambiguity_ids[i];
+				_ambIF_manager->updateAmb(amb_id, _para_AMB_IF[amb_id][0]);
+				//cout << amb_id <<": "<< _para_amb[amb_id][0] << "   " ;
+			}
 		}
 	}
 	// PPP
@@ -1281,6 +1679,8 @@ void gfgomsf::t_gpvtfgo::_double_to_vector()
 				_isb_BDS[i] = _para_ISB_BDS[i][0];
 			if (!_lost_isb_GLO[i])
 				_isb_GLO[i] = _para_ISB_GLO[i][0];
+			if (!_lost_isb_QZS[i])
+				_isb_QZS[i] = _para_ISB_QZS[i][0];
 		}
 	}
 
@@ -1305,12 +1705,24 @@ void gfgomsf::t_gpvtfgo::_vector_to_double()
 	}
 	else
 	{
-		for (int i = 0; i < _ambIF_manager->ambiguity_ids.size(); i++)
+		if (_observ == OBSCOMBIN::RAW_ALL)
 		{
-			int amb_id = _ambIF_manager->ambiguity_ids[i];
-			_para_AMB_IF[amb_id][0] = _ambIF_manager->getAmb(amb_id);
+			for (int amb_id : _ambRAW_manager->ambiguity_ids)
+			{
+				if (amb_id >= 0 && amb_id < NUM_OF_ARC)
+					_para_AMB_RAW[amb_id][0] = _ambRAW_manager->getAmb(amb_id);
+			}
+			_ambRAW_manager->generateAmbSearchIndex();
 		}
-		_ambIF_manager->generateAmbSearchIndex();
+		else
+		{
+			for (int i = 0; i < _ambIF_manager->ambiguity_ids.size(); i++)
+			{
+				int amb_id = _ambIF_manager->ambiguity_ids[i];
+				_para_AMB_IF[amb_id][0] = _ambIF_manager->getAmb(amb_id);
+			}
+			_ambIF_manager->generateAmbSearchIndex();
+		}
 	}
 	//for PPP IF:
 	if (!_isBase)
@@ -1325,6 +1737,8 @@ void gfgomsf::t_gpvtfgo::_vector_to_double()
 				_para_ISB_BDS[i][0] = _isb_BDS[i];
 			if (!_lost_isb_GLO[i])
 				_para_ISB_GLO[i][0] = _isb_GLO[i];
+			if (!_lost_isb_QZS[i])
+				_para_ISB_QZS[i][0] = _isb_QZS[i];
 		}
 	}
 }
@@ -1656,6 +2070,154 @@ bool gfgomsf::t_gpvtfgo::_remove_outlier_sat(const pair<string, int>& outlier)
     	else return false;
     }
 
+    if (!_isBase && _observ == OBSCOMBIN::RAW_ALL && outlier.first != " ")
+    {
+		const int raw_index = _raw_outlier_index;
+		RawObsIndex raw_obs;
+		const bool has_raw_index =
+			raw_index >= 0 && raw_index < static_cast<int>(_raw_obs_index.size());
+		if (has_raw_index)
+			raw_obs = _raw_obs_index[raw_index];
+		_raw_outlier_index = -1;
+
+		auto refresh_raw_satellites = [&]()
+		{
+			_ambRAW_manager->get_last_epoch_sats(_epoch.sow());
+			_ambRAW_manager->generateAmbSearchIndex();
+			const char system_prefix = outlier.first.empty() ? '\0' : outlier.first.front();
+			auto has_system_prefix = [&](char prefix)
+			{
+				return find_if(_ambRAW_manager->cur_sats.begin(), _ambRAW_manager->cur_sats.end(),
+					[&prefix](const pair<string, int> &sat)
+					{
+						return !sat.first.empty() && sat.first.front() == prefix;
+					}) != _ambRAW_manager->cur_sats.end();
+			};
+			if (system_prefix == 'E')
+				_lost_isb_GAL[_rover_count] = !has_system_prefix('E');
+			else if (system_prefix == 'C')
+				_lost_isb_BDS[_rover_count] = !has_system_prefix('C');
+			else if (system_prefix == 'R')
+				_lost_isb_GLO[_rover_count] = !has_system_prefix('R');
+			else if (system_prefix == 'J')
+				_lost_isb_QZS[_rover_count] = !has_system_prefix('J');
+		};
+
+		// RAW residuals have a one-to-one message index.  Code outliers are
+		// removed only from that equation; phase outliers conservatively end
+		// the satellite's phase use for the current window and force a fresh
+		// ambiguity arc when the satellite next contributes phase data.
+		if (has_raw_index && raw_obs.node >= 0 &&
+			raw_obs.node < static_cast<int>(_vRAW_msg.size()))
+		{
+			auto message_matches = [&](const RAWEquMsg &message)
+			{
+				return message.sat_global_id == raw_obs.sat_global_id &&
+					message.obs_type == raw_obs.obs_type &&
+					message.obs == raw_obs.obs &&
+					message.freq == raw_obs.freq &&
+					(raw_obs.amb_index < 0 || message.amb_index == raw_obs.amb_index);
+			};
+
+			if (raw_obs.obs_type == TYPE_C)
+			{
+				bool current_has_other = true;
+				if (raw_obs.node == _rover_count)
+				{
+					current_has_other = false;
+					for (const auto &message : _vRAW_msg[_rover_count])
+					{
+						if (message.sat_global_id == raw_obs.sat_global_id &&
+							!message_matches(message))
+						{
+							current_has_other = true;
+							break;
+						}
+					}
+					if (!current_has_other && _ambRAW_manager->cur_sats.size() <= _minsat)
+						return false;
+				}
+
+				auto &raw_epoch = _vRAW_msg[raw_obs.node];
+				auto old_size = raw_epoch.size();
+				raw_epoch.erase(remove_if(raw_epoch.begin(), raw_epoch.end(), message_matches), raw_epoch.end());
+				if (raw_epoch.size() == old_size)
+					return false;
+				if (raw_obs.node == _rover_count)
+				{
+					_RAW_msg = raw_epoch;
+					if (!current_has_other)
+					{
+						_ambRAW_manager->removeSat(raw_obs.sat_global_id, _rover_count);
+						refresh_raw_satellites();
+					}
+				}
+				if (_last_gnss_info)
+					_last_gnss_info->valid = false;
+				return true;
+			}
+
+			if (raw_obs.obs_type == TYPE_L)
+			{
+				bool current_has_other_observation = false;
+				for (const auto &message : _vRAW_msg[_rover_count])
+				{
+					if (message.sat_global_id == raw_obs.sat_global_id &&
+						!message_matches(message))
+					{
+						current_has_other_observation = true;
+						break;
+					}
+				}
+				if (!current_has_other_observation &&
+					_ambRAW_manager->cur_sats.size() <= _minsat)
+					return false;
+
+				for (auto &raw_epoch : _vRAW_msg)
+				{
+					raw_epoch.erase(remove_if(raw_epoch.begin(), raw_epoch.end(),
+						[&raw_obs](const RAWEquMsg &message)
+						{
+							return message.sat_global_id == raw_obs.sat_global_id &&
+								message.obs_type == TYPE_L &&
+								message.freq == raw_obs.freq &&
+								(raw_obs.amb_index < 0 ||
+								 message.amb_index == raw_obs.amb_index);
+						}), raw_epoch.end());
+				}
+				_RAW_msg = _vRAW_msg[_rover_count];
+				_pending_raw_slips[raw_obs.sat].insert(raw_obs.freq);
+				_pending_ppp_slips.insert(raw_obs.sat);
+				if (!current_has_other_observation)
+				{
+					_ambRAW_manager->removeSat(raw_obs.sat_global_id, _rover_count);
+					refresh_raw_satellites();
+				}
+				if (_last_gnss_info)
+					_last_gnss_info->valid = false;
+				return true;
+			}
+		}
+
+		// If the residual could not be mapped back to a RAW message, use the
+		// existing satellite-level fallback rather than leaving the bad factor
+		// in the graph.
+		if (_ambRAW_manager->cur_sats.size() <= _minsat)
+			return false;
+		auto &raw_epoch = _vRAW_msg[_rover_count];
+		raw_epoch.erase(remove_if(raw_epoch.begin(), raw_epoch.end(),
+			[&outlier](const RAWEquMsg &message)
+			{
+				return message.sat_global_id == outlier.second;
+			}), raw_epoch.end());
+		_RAW_msg = raw_epoch;
+		_ambRAW_manager->removeSat(outlier.second, _rover_count);
+		refresh_raw_satellites();
+		if (_last_gnss_info)
+			_last_gnss_info->valid = false;
+		return true;
+    }
+
     if (!_isBase && outlier.first != " ")
     {
         if (_ambIF_manager->cur_sats.size() > _minsat)//add for MultiWindow
@@ -1739,9 +2301,18 @@ bool gfgomsf::t_gpvtfgo::_pre_amb_resolution()
 	ColumnVector l_fgo, dx_fgo;
 	SymmetricMatrix Qx0_fgo,Qx_fgo;
 	double vtpv_fgo;
+	if (!_last_gnss_info || !_last_gnss_info->valid)
+		return false;
 	nobs_total = _last_gnss_info->linearized_jacobians.rows();
 	npar_number = _last_gnss_info->linearized_jacobians.cols();
-	assert(npar_number == construct_para.parNumber());
+	if (npar_number != construct_para.parNumber() || npar_number <= 0)
+	{
+		if (_spdlog)
+			_spdlog->error(
+				"PPP FGO: ambiguity-resolution input parameter count does not "
+				"match the RAW/IF posterior equation");
+		return false;
+	}
 	//cout << "nobs_total：" << nobs_total << endl;
 	//cout << "npar_number：" << npar_number << endl;
 	A_fgo.ReSize(nobs_total,npar_number);
@@ -1923,8 +2494,224 @@ int gfgomsf::t_gpvtfgo::_optimization()
 	return 1;
 }
 
+int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
+{
+    _removed_sats.clear();
+    t_tictoc fgo_gnss;
+    int count = 0;
+    bool iter_flag = false;
+    pair<string, int> outlier = make_pair(" ", -1);
+
+    do
+    {
+        ++count;
+        if (!_remove_outlier_sat(outlier))
+        {
+            if (outlier.first != " " && _last_gnss_info)
+                _last_gnss_info->valid = false;
+            return -1;
+        }
+
+        _vector_to_double();
+        ceres::Problem problem;
+        ceres::LossFunction *loss_function = new ceres::HuberLoss(_loss_func_value);
+        ceres::LossFunction *loss_function_cp = new ceres::HuberLoss(_loss_func_value);
+
+        for (int i = 0; i <= _rover_count; ++i)
+        {
+            problem.AddParameterBlock(_para_CRD[i], 3);
+            problem.AddParameterBlock(_para_CLK[i], 1);
+            problem.AddParameterBlock(_para_TRP[i], 1);
+            if (!_lost_isb_GAL[i])
+                problem.AddParameterBlock(_para_ISB_GAL[i], 1);
+            if (!_lost_isb_BDS[i])
+                problem.AddParameterBlock(_para_ISB_BDS[i], 1);
+            if (!_lost_isb_GLO[i])
+                problem.AddParameterBlock(_para_ISB_GLO[i], 1);
+			if (!_lost_isb_QZS[i])
+				problem.AddParameterBlock(_para_ISB_QZS[i], 1);
+        }
+
+        vector<set<int>> node_sion(static_cast<size_t>(_rover_count + 1));
+        set<int> raw_ambiguities;
+        for (int i = 0; i <= _rover_count; ++i)
+        {
+            if (i >= static_cast<int>(_vRAW_msg.size()))
+                continue;
+            for (const auto &message : _vRAW_msg[i])
+            {
+                if (message.sat_global_id >= 0 && message.sat_global_id < NUM_OF_ARC)
+                    node_sion[i].insert(message.sat_global_id);
+                if (message.obs_type == TYPE_L && message.amb_index >= 0 && message.amb_index < NUM_OF_ARC)
+                    raw_ambiguities.insert(message.amb_index);
+            }
+        }
+        for (int i = 0; i <= _rover_count; ++i)
+            for (int sat_id : node_sion[i])
+                problem.AddParameterBlock(&_para_SION[i][sat_id], 1);
+        for (int amb_id : raw_ambiguities)
+            problem.AddParameterBlock(_para_AMB_RAW[amb_id], 1);
+
+        _prior_factor(problem);
+
+        for (int i = 0; i < _rover_count; ++i)
+        {
+            const double graph_dt = std::fabs(_headers[i + 1] - _headers[i]);
+            if (_ionStoModel)
+            {
+                const double q = graph_interval_random_walk_q(_ionStoModel, graph_dt);
+                if (q > 0.0 && std::isfinite(q))
+                {
+                    for (int sat_id : node_sion[i])
+                    {
+                        if (node_sion[i + 1].count(sat_id) == 0)
+                            continue;
+                        problem.AddResidualBlock(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+                                                 &_para_SION[i][sat_id], &_para_SION[i + 1][sat_id]);
+                    }
+                }
+            }
+        }
+		for (int i = 0; i <= _rover_count; ++i)
+		{
+			for (int sat_id : node_sion[i])
+			{
+				if (_raw_sion_initial_nodes[i].count(sat_id) != 0)
+					problem.AddResidualBlock(new InitialFactor(0.0, 1.0 / _sig_init_vion), nullptr,
+											 &_para_SION[i][sat_id]);
+			}
+        }
+
+        for (int i = 0; i <= _rover_count; ++i)
+        {
+            if (i == 0)
+                continue;
+            const double graph_dt = std::fabs(_headers[i] - _headers[i - 1]);
+            if (!_lost_isb_GAL[i] && !_lost_isb_GAL[i - 1] && _galStoModel)
+                problem.AddResidualBlock(new RandomWalkFactor(1.0 / sqrt(graph_interval_random_walk_q(_galStoModel, graph_dt))), nullptr,
+                                         _para_ISB_GAL[i - 1], _para_ISB_GAL[i]);
+            if (!_lost_isb_BDS[i] && !_lost_isb_BDS[i - 1] && _bdsStoModel)
+                problem.AddResidualBlock(new RandomWalkFactor(1.0 / sqrt(graph_interval_random_walk_q(_bdsStoModel, graph_dt))), nullptr,
+                                         _para_ISB_BDS[i - 1], _para_ISB_BDS[i]);
+            if (!_lost_isb_GLO[i] && !_lost_isb_GLO[i - 1] && _gloStoModel)
+                problem.AddResidualBlock(new RandomWalkFactor(1.0 / sqrt(graph_interval_random_walk_q(_gloStoModel, graph_dt))), nullptr,
+                                         _para_ISB_GLO[i - 1], _para_ISB_GLO[i]);
+			if (!_lost_isb_QZS[i] && !_lost_isb_QZS[i - 1] && _qzsStoModel)
+				problem.AddResidualBlock(new RandomWalkFactor(1.0 / sqrt(graph_interval_random_walk_q(_qzsStoModel, graph_dt))), nullptr,
+									 _para_ISB_QZS[i - 1], _para_ISB_QZS[i]);
+        }
+
+        for (int i = 0; i <= _rover_count; ++i)
+        {
+            problem.AddResidualBlock(new InitialFactor(_trp_ini, 1.0 / _sig_init_ztd), nullptr, _para_TRP[i]);
+            problem.AddResidualBlock(new InitialFactor(_clk[i], 1.0 / _clkStoModel->getQ()), nullptr, _para_CLK[i]);
+            problem.AddResidualBlock(new InitialGnssCRD(_Pos[i], 1.0 / _sig_init_crd), nullptr, _para_CRD[i]);
+            if (!_lost_isb_GAL[i])
+                problem.AddResidualBlock(new InitialFactor(0.0, 1.0 / _sig_init_gal), nullptr, _para_ISB_GAL[i]);
+            if (!_lost_isb_BDS[i])
+                problem.AddResidualBlock(new InitialFactor(0.0, 1.0 / _sig_init_bds), nullptr, _para_ISB_BDS[i]);
+            if (!_lost_isb_GLO[i])
+                problem.AddResidualBlock(new InitialFactor(0.0, 1.0 / _sig_init_glo), nullptr, _para_ISB_GLO[i]);
+			if (!_lost_isb_QZS[i])
+				problem.AddResidualBlock(new InitialFactor(0.0, 1.0 / _sig_init_qzs), nullptr, _para_ISB_QZS[i]);
+        }
+        for (int amb_id : raw_ambiguities)
+        {
+            problem.AddResidualBlock(new InitialGnssAMB(_ambRAW_manager->getInitialAmb(amb_id), 1.0 / _sigAmbig),
+                                     nullptr, _para_AMB_RAW[amb_id]);
+        }
+
+        if (_vRAW_msg.size() != static_cast<size_t>(_rover_count + 1))
+        {
+            if (_last_gnss_info)
+                _last_gnss_info->valid = false;
+            return -1;
+        }
+
+        for (int i = 0; i <= _rover_count; ++i)
+        {
+            const t_gallpar params_temp(_para_window[i]);
+            for (const auto &message : _vRAW_msg[i])
+            {
+                const int sat_id = message.sat_global_id;
+                if (sat_id < 0 || sat_id >= NUM_OF_ARC ||
+                    message.obs == GOBS::X || node_sion[i].count(sat_id) == 0)
+                    continue;
+
+                const GSYS system = message.satdata.gsys();
+                const bool is_gps = system == GSYS::GPS;
+                const bool is_gal = system == GSYS::GAL && !_lost_isb_GAL[i];
+                const bool is_bds = system == GSYS::BDS && !_lost_isb_BDS[i];
+                const bool is_glo = system == GSYS::GLO && !_lost_isb_GLO[i];
+                const bool is_qzs = system == GSYS::QZS && !_lost_isb_QZS[i];
+                if (!is_gps && !is_gal && !is_bds && !is_glo && !is_qzs)
+                    continue;
+
+                if (message.obs_type == TYPE_C)
+                {
+                    if (is_gps)
+                    {
+                        problem.AddResidualBlock(new PseudorangeRAWFactor(message, params_temp, _gbias_model),
+                                                 loss_function, _para_CRD[i], _para_CLK[i], _para_TRP[i],
+                                                 &_para_SION[i][sat_id]);
+                    }
+                    else
+                    {
+                        double *isb = is_gal ? _para_ISB_GAL[i] :
+						(is_bds ? _para_ISB_BDS[i] :
+						 (is_glo ? _para_ISB_GLO[i] : _para_ISB_QZS[i]));
+                        problem.AddResidualBlock(new MultiPseudorangeRAWFactor(message, params_temp, _gbias_model),
+                                                 loss_function, _para_CRD[i], _para_CLK[i], _para_TRP[i],
+                                                 &_para_SION[i][sat_id], isb);
+                    }
+                }
+                else if (message.obs_type == TYPE_L && message.amb_index >= 0 &&
+                         raw_ambiguities.count(message.amb_index))
+                {
+                    if (is_gps)
+                    {
+                        problem.AddResidualBlock(new CarrierphaseRAWFactor(message, params_temp, _gbias_model),
+                                                 loss_function_cp, _para_CRD[i], _para_CLK[i], _para_TRP[i],
+                                                 &_para_SION[i][sat_id], _para_AMB_RAW[message.amb_index]);
+                    }
+                    else
+                    {
+                        double *isb = is_gal ? _para_ISB_GAL[i] :
+						(is_bds ? _para_ISB_BDS[i] :
+						 (is_glo ? _para_ISB_GLO[i] : _para_ISB_QZS[i]));
+                        problem.AddResidualBlock(new MultiCarrierphaseRAWFactor(message, params_temp, _gbias_model),
+                                                 loss_function_cp, _para_CRD[i], _para_CLK[i], _para_TRP[i],
+                                                 &_para_SION[i][sat_id], isb, _para_AMB_RAW[message.amb_index]);
+                    }
+                }
+            }
+        }
+
+        ceres::Solver::Options options;
+        options.linear_solver_type = ceres::DENSE_QR;
+        options.max_num_iterations = 10;
+        options.trust_region_strategy_type = ceres::DOGLEG;
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+
+        _posteriori_test_PPP_RAW(problem);
+        iter_flag = _gobs_outlier_detection(outlier) >= 0;
+    } while (iter_flag);
+
+    if (!_last_gnss_info || !_last_gnss_info->valid)
+        return -1;
+    _double_to_vector();
+    if (_spdlog)
+        _spdlog->debug("PPP RAW FGO epoch {} solved in {} ms after {} iteration(s)",
+                       _headers[_rover_count], fgo_gnss.toc(), count);
+    return 1;
+}
+
 int gfgomsf::t_gpvtfgo::_optimization_PPP()
 {
+    if (_observ == OBSCOMBIN::RAW_ALL)
+        return _optimization_PPP_RAW();
+
     _removed_sats.clear();
     t_tictoc fgo_gnss;
     int count = 0;
@@ -2223,6 +3010,89 @@ void gfgomsf::t_gpvtfgo::_record_ppp_cycle_slips(
 	const double nominal_interval =
 		_sampling > 0.0 ? _sampling : 1.0;
 
+	if (_observ == OBSCOMBIN::RAW_ALL)
+	{
+		_candidate_raw_phase_obs.clear();
+		_candidate_raw_phase_epoch.clear();
+		auto *gnss_setting = dynamic_cast<t_gsetgnss *>(_set);
+		if (!gnss_setting)
+			return;
+
+		// RAW observations retain each selected signal explicitly.  Check LLI,
+		// signal switching, and continuity independently for every frequency;
+		// a missing frequency must not hide a slip on another frequency.
+		for (const auto& sat_data : epoch_data)
+		{
+			const std::string sat_name = sat_data.sat();
+			const GSYS system = sat_data.gsys();
+			const std::vector<GOBSBAND> bands = gnss_setting->band(system);
+			const int frequency_count =
+				(std::min)(5, bands.empty() ? 5 : static_cast<int>(bands.size()));
+			for (int frequency_number = 1;
+				 frequency_number <= frequency_count && frequency_number <= _frequency;
+				 ++frequency_number)
+			{
+				const FREQ_SEQ frequency =
+					static_cast<FREQ_SEQ>(frequency_number);
+				const GOBSBAND band =
+					bands.size() >= static_cast<size_t>(frequency_number)
+						? bands[frequency_number - 1]
+						: t_gsys::band_priority(system, frequency);
+				const t_gobs phase_obs(sat_data.select_phase(band, true));
+				const GOBS phase_gobs = phase_obs.gobs();
+				if (phase_gobs == GOBS::X ||
+					double_eq(sat_data.obs_L(phase_obs), 0.0))
+				{
+					continue;
+				}
+
+				bool slip = sat_data.getlli(phase_gobs) >= 1;
+				const auto last_obs_it = _last_raw_phase_obs[sat_name].find(frequency);
+				if (last_obs_it != _last_raw_phase_obs[sat_name].end() &&
+					last_obs_it->second != phase_gobs)
+				{
+					slip = true;
+					if (_spdlog)
+						_spdlog->info(
+							"PPP FGO RAW: carrier signal switched for {} F{} at {}",
+							sat_name, frequency_number,
+							sat_data.epoch().str_ymdhms());
+				}
+
+				const auto last_epoch_it = _last_raw_phase_epoch[sat_name].find(frequency);
+				if (last_epoch_it != _last_raw_phase_epoch[sat_name].end())
+				{
+					const double phase_gap = sat_data.epoch().diff(last_epoch_it->second);
+					if (phase_gap > 1.5 * nominal_interval)
+					{
+						slip = true;
+						if (_spdlog)
+							_spdlog->info(
+								"PPP FGO RAW: ambiguity reset for {} F{} at {} "
+								"after {:.3f} s carrier gap",
+								sat_name, frequency_number,
+								sat_data.epoch().str_ymdhms(), phase_gap);
+					}
+				}
+
+				_candidate_raw_phase_obs[sat_name][frequency] = phase_gobs;
+				_candidate_raw_phase_epoch[sat_name][frequency] = sat_data.epoch();
+				if (slip)
+				{
+					const bool newly_recorded =
+						_pending_raw_slips[sat_name].insert(frequency).second;
+					_pending_ppp_slips.insert(sat_name);
+					if (newly_recorded && _spdlog)
+						_spdlog->info(
+							"PPP FGO RAW: pending cycle slip recorded for {} F{} at {}",
+							sat_name, frequency_number,
+							sat_data.epoch().str_ymdhms());
+				}
+			}
+		}
+		return;
+	}
+
 	for (const auto& sat_data : epoch_data)
 	{
 		const std::string sat_name = sat_data.sat();
@@ -2301,8 +3171,18 @@ bool gfgomsf::t_gpvtfgo::_ppp_candidate_has_phase(
 	const std::string& sat_name) const
 {
 	if (_rover_count < 0 ||
-		_vIF_msg.size() <= static_cast<size_t>(_rover_count))
+		((_observ == OBSCOMBIN::RAW_ALL ? _vRAW_msg.size() : _vIF_msg.size()) <= static_cast<size_t>(_rover_count)))
 		return false;
+
+	if (_observ == OBSCOMBIN::RAW_ALL)
+	{
+		for (const auto& raw_msg : _vRAW_msg[_rover_count])
+		{
+			if (raw_msg.obs_type == GOBSTYPE::TYPE_L && raw_msg.sat_id == sat_name)
+				return true;
+		}
+		return false;
+	}
 
 	for (const auto& if_msg : _vIF_msg[_rover_count])
 	{
@@ -2315,23 +3195,56 @@ bool gfgomsf::t_gpvtfgo::_ppp_candidate_has_phase(
 
 void gfgomsf::t_gpvtfgo::_commit_ppp_cycle_slips()
 {
+	if (_observ == OBSCOMBIN::RAW_ALL)
+	{
+		// Publish continuity only after the candidate node has survived
+		// optimization and outlier removal.  A rejected epoch must not become
+		// the reference epoch for the next RAW gap check.
+		for (const auto &candidate : _candidate_raw_phase_obs)
+		{
+			const auto &active_sats = _ambRAW_manager->cur_sats;
+			const auto active = std::find_if(
+				active_sats.begin(), active_sats.end(),
+				[&candidate](const pair<string, int> &sat)
+				{
+					return sat.first == candidate.first;
+				});
+			if (active == active_sats.end() ||
+				!_ppp_candidate_has_phase(candidate.first))
+			{
+				continue;
+			}
+
+			_last_raw_phase_obs[candidate.first] = candidate.second;
+			const auto epoch = _candidate_raw_phase_epoch.find(candidate.first);
+			if (epoch != _candidate_raw_phase_epoch.end())
+				_last_raw_phase_epoch[candidate.first] = epoch->second;
+		}
+	}
+
 	for (const auto& sat_name : _candidate_ppp_slips)
 	{
+		const auto &active_sats = (_observ == OBSCOMBIN::RAW_ALL)
+			? _ambRAW_manager->cur_sats : _ambIF_manager->cur_sats;
 		const auto active = std::find_if(
-			_ambIF_manager->cur_sats.begin(),
-			_ambIF_manager->cur_sats.end(),
+			active_sats.begin(),
+			active_sats.end(),
 			[&sat_name](const pair<string, int>& sat)
 			{
 				return sat.first == sat_name;
 			});
 
-		if (active != _ambIF_manager->cur_sats.end() &&
+		if (active != active_sats.end() &&
 			_ppp_candidate_has_phase(sat_name))
 		{
 			_pending_ppp_slips.erase(sat_name);
+			if (_observ == OBSCOMBIN::RAW_ALL)
+				_pending_raw_slips.erase(sat_name);
 		}
 	}
 	_candidate_ppp_slips.clear();
+	_candidate_raw_phase_obs.clear();
+	_candidate_raw_phase_epoch.clear();
 }
 
 void gfgomsf::t_gpvtfgo::_rollback_current_ppp_node()
@@ -2345,15 +3258,34 @@ void gfgomsf::t_gpvtfgo::_rollback_current_ppp_node()
 	// satellite already rejected during the outlier loop has already been
 	// detached and therefore is intentionally absent here.
 	set<int> sat_ids;
-	for (const auto& sat : _ambIF_manager->cur_sats)
+	const auto &active_sats = (_observ == OBSCOMBIN::RAW_ALL)
+		? _ambRAW_manager->cur_sats : _ambIF_manager->cur_sats;
+	for (const auto& sat : active_sats)
 		sat_ids.insert(sat.second);
 
 	for (const int sat_id : sat_ids)
-		_ambIF_manager->removeSat(sat_id, failed_rover);
+	{
+		if (_observ == OBSCOMBIN::RAW_ALL)
+			_ambRAW_manager->removeSat(sat_id, failed_rover);
+		else
+			_ambIF_manager->removeSat(sat_id, failed_rover);
+	}
 
-	_IF_msg.clear();
-	if (_vIF_msg.size() > static_cast<size_t>(failed_rover))
-		_vIF_msg.pop_back();
+	if (_observ == OBSCOMBIN::RAW_ALL)
+	{
+		_RAW_msg.clear();
+		_raw_outlier_index = -1;
+		if (_vRAW_msg.size() > static_cast<size_t>(failed_rover))
+			_vRAW_msg.pop_back();
+		memset(_para_SION[failed_rover], 0, sizeof(_para_SION[failed_rover]));
+		_raw_sion_initial_nodes[failed_rover].clear();
+	}
+	else
+	{
+		_IF_msg.clear();
+		if (_vIF_msg.size() > static_cast<size_t>(failed_rover))
+			_vIF_msg.pop_back();
+	}
 
 	if (_rover_window[failed_rover] != nullptr)
 		delete _rover_window[failed_rover];
@@ -2367,19 +3299,33 @@ void gfgomsf::t_gpvtfgo::_rollback_current_ppp_node()
 	_isb_GAL[failed_rover] = 0.0;
 	_isb_BDS[failed_rover] = 0.0;
 	_isb_GLO[failed_rover] = 0.0;
+	_isb_QZS[failed_rover] = 0.0;
 	_lost_isb_GAL[failed_rover] = false;
 	_lost_isb_BDS[failed_rover] = false;
 	_lost_isb_GLO[failed_rover] = false;
+	_lost_isb_QZS[failed_rover] = false;
 
 	if (failed_rover > 0)
-		_ambIF_manager->get_last_epoch_sats(_headers[failed_rover - 1]);
+	{
+		if (_observ == OBSCOMBIN::RAW_ALL)
+			_ambRAW_manager->get_last_epoch_sats(_headers[failed_rover - 1]);
+		else
+			_ambIF_manager->get_last_epoch_sats(_headers[failed_rover - 1]);
+	}
 	else
-		_ambIF_manager->cur_sats.clear();
+	{
+		if (_observ == OBSCOMBIN::RAW_ALL)
+			_ambRAW_manager->cur_sats.clear();
+		else
+			_ambIF_manager->cur_sats.clear();
+	}
 	_rover_count--;
 
 	_global_sat_id = _ppp_candidate_global_sat_id;
 	_global_amb_id = _ppp_candidate_global_amb_id;
 	_candidate_ppp_slips.clear();
+	_candidate_raw_phase_obs.clear();
+	_candidate_raw_phase_epoch.clear();
 
 	if (_spdlog)
 		_spdlog->warn("PPP FGO: rollback rejected GNSS epoch {}", _epoch.str_ymdhms());
@@ -2389,6 +3335,7 @@ void gfgomsf::t_gpvtfgo::_slide_window()
 {
 	if (_rover_count == gwindow_size-1)
 	{
+		const double outgoing_epoch = _headers[0];
 		// gwindow_size is the number of active nodes in this port. When the
 		// last valid index is gwindow_size - 1, shift only surviving nodes.
 		for (int i = 0; i < gwindow_size - 1; i++)
@@ -2408,18 +3355,29 @@ void gfgomsf::t_gpvtfgo::_slide_window()
 				_isb_GAL[i] = _isb_GAL[i + 1];
 				_isb_BDS[i] = _isb_BDS[i + 1];
 				_isb_GLO[i] = _isb_GLO[i + 1];
+				_isb_QZS[i] = _isb_QZS[i + 1];
+				if (_observ == OBSCOMBIN::RAW_ALL)
+					memcpy(_para_SION[i], _para_SION[i + 1], sizeof(_para_SION[i]));
+				if (_observ == OBSCOMBIN::RAW_ALL)
+					_raw_sion_initial_nodes[i] = _raw_sion_initial_nodes[i + 1];
 				_lost_isb_GAL[i] = _lost_isb_GAL[i + 1];
 				_lost_isb_BDS[i] = _lost_isb_BDS[i + 1];
 				_lost_isb_GLO[i] = _lost_isb_GLO[i + 1];
+				_lost_isb_QZS[i] = _lost_isb_QZS[i + 1];
 			}
 		}
+		if (!_isBase && _observ == OBSCOMBIN::RAW_ALL)
+			_raw_sion_initial_nodes[gwindow_size - 1].clear();
 		if(_isBase)
 		{
 			_vDD_msg.erase(_vDD_msg.begin());
 		}
 		else
 		{
-			_vIF_msg.erase(_vIF_msg.begin());
+			if (_observ == OBSCOMBIN::RAW_ALL)
+				_vRAW_msg.erase(_vRAW_msg.begin());
+			else
+				_vIF_msg.erase(_vIF_msg.begin());
 		}
 		delete _rover_window[gwindow_size - 1];
 		_rover_window[gwindow_size - 1] = nullptr;
@@ -2430,7 +3388,10 @@ void gfgomsf::t_gpvtfgo::_slide_window()
 		}
 		else
 		{
-			_ambIF_manager->slidingWindow();
+			if (_observ == OBSCOMBIN::RAW_ALL)
+				_ambRAW_manager->slidingWindow(outgoing_epoch);
+			else
+				_ambIF_manager->slidingWindow();
 		}
 		_rover_count--;
 	}
@@ -2440,7 +3401,10 @@ void gfgomsf::t_gpvtfgo::_slide_window()
 	}
 	else
 	{
-		_ambIF_manager->get_last_epoch_sats(_epoch.sow());
+		if (_observ == OBSCOMBIN::RAW_ALL)
+			_ambRAW_manager->get_last_epoch_sats(_epoch.sow());
+		else
+			_ambIF_manager->get_last_epoch_sats(_epoch.sow());
 	}
 
 }
@@ -2596,6 +3560,12 @@ void gfgomsf::t_gpvtfgo::_marginalization()
 
 void gfgomsf::t_gpvtfgo::_marginalization_PPP()
 {
+    if (_observ == OBSCOMBIN::RAW_ALL)
+    {
+        _marginalization_PPP_RAW();
+        return;
+    }
+
     //if (_rover_count == GWIN_SIZE)//delete for MultiWindow
     if (_rover_count == gwindow_size-1)//add for MultiWindow
     {
@@ -2820,8 +3790,338 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP()
     }//GWIN_SIZE
 }
 
+void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
+{
+    if (_rover_count != gwindow_size - 1 || _vRAW_msg.size() <= 1 || !_ambRAW_manager)
+        return;
+
+    _vector_to_double();
+
+    GNSSInfo *gnss_marginalization_info = new GNSSInfo();
+    ceres::LossFunction *loss_function = new ceres::HuberLoss(_loss_func_value);
+    ceres::LossFunction *loss_function_cp = new ceres::HuberLoss(_loss_func_value);
+
+    const vector<int> margin_amb = _ambRAW_manager->getMarginAmb();
+    const set<int> margin_amb_set(margin_amb.begin(), margin_amb.end());
+
+    // A previous RAW prior is expressed with the current window addresses.
+    // Drop all state blocks belonging to the outgoing node.  The retained
+    // blocks are shifted below after the new Schur complement is formed.
+    if (_last_gnss_marginalization_info && _last_gnss_marginalization_info->valid)
+    {
+        vector<int> drop_set;
+        const auto is_outgoing_address = [&](double *address) -> bool
+        {
+            if (address == _para_CRD[0] || address == _para_CLK[0] || address == _para_TRP[0])
+                return true;
+            if (address == _para_ISB_GAL[0] || address == _para_ISB_BDS[0] ||
+				address == _para_ISB_GLO[0] || address == _para_ISB_QZS[0])
+                return true;
+            for (int sat_id = 0; sat_id < NUM_OF_ARC; ++sat_id)
+            {
+                if (address == &_para_SION[0][sat_id])
+                    return true;
+            }
+            for (int amb_id = 0; amb_id < NUM_OF_ARC; ++amb_id)
+            {
+                if (address == _para_AMB_RAW[amb_id])
+                {
+                    const bool active = find(_ambRAW_manager->ambiguity_ids.begin(),
+                                             _ambRAW_manager->ambiguity_ids.end(), amb_id) !=
+                                         _ambRAW_manager->ambiguity_ids.end();
+                    return !active || margin_amb_set.count(amb_id) != 0;
+                }
+            }
+            return false;
+        };
+
+        for (int i = 0; i < static_cast<int>(_last_gnss_marginalization_para_blocks.size()); ++i)
+        {
+            if (is_outgoing_address(_last_gnss_marginalization_para_blocks[i]))
+                drop_set.push_back(i);
+        }
+        if (!drop_set.empty())
+        {
+            MarginalizationGNSSFactor *prior_factor =
+                new MarginalizationGNSSFactor(_last_gnss_marginalization_info);
+            gnss_marginalization_info->addResidualBlockInfo(
+                new GNSSResidualBlockInfo(prior_factor, nullptr,
+                                          _last_gnss_marginalization_para_blocks,
+                                          drop_set));
+        }
+    }
+
+    auto add_raw_factor = [&](const RAWEquMsg &message, const t_gallpar &params_temp)
+    {
+        if (message.sat_global_id < 0 || message.sat_global_id >= NUM_OF_ARC)
+            return;
+
+        const GSYS system = message.satdata.gsys();
+        const bool is_gps = system == GSYS::GPS;
+        const bool is_gal = system == GSYS::GAL && !_lost_isb_GAL[0];
+        const bool is_bds = system == GSYS::BDS && !_lost_isb_BDS[0];
+        const bool is_glo = system == GSYS::GLO && !_lost_isb_GLO[0];
+        const bool is_qzs = system == GSYS::QZS && !_lost_isb_QZS[0];
+        if (!is_gps && !is_gal && !is_bds && !is_glo && !is_qzs)
+            return;
+
+        const bool multi_system = !is_gps;
+        vector<double *> blocks;
+        vector<int> drop_set{0, 1, 2, 3}; // CRD, CLK, TRP and the outgoing SION.
+        ceres::CostFunction *cost = nullptr;
+
+        if (message.obs_type == TYPE_C)
+        {
+            if (is_gps)
+            {
+                cost = new PseudorangeRAWFactor(message, params_temp, _gbias_model);
+                blocks = {_para_CRD[0], _para_CLK[0], _para_TRP[0], &_para_SION[0][message.sat_global_id]};
+            }
+            else
+            {
+                double *isb = is_gal ? _para_ISB_GAL[0] :
+					(is_bds ? _para_ISB_BDS[0] :
+					 (is_glo ? _para_ISB_GLO[0] : _para_ISB_QZS[0]));
+                cost = new MultiPseudorangeRAWFactor(message, params_temp, _gbias_model);
+                blocks = {_para_CRD[0], _para_CLK[0], _para_TRP[0],
+                          &_para_SION[0][message.sat_global_id], isb};
+                drop_set.push_back(4); // ISB is propagated by its random walk.
+            }
+        }
+        else if (message.obs_type == TYPE_L && message.amb_index >= 0 && message.amb_index < NUM_OF_ARC)
+        {
+            if (_ambRAW_manager->getAmbStartRoverID(message.amb_index) != 0)
+                return;
+
+            const bool drop_amb = _ambRAW_manager->getAmbEndRoverID(message.amb_index) == 0 ||
+                                  margin_amb_set.count(message.amb_index) != 0;
+            if (is_gps)
+            {
+                cost = new CarrierphaseRAWFactor(message, params_temp, _gbias_model);
+                blocks = {_para_CRD[0], _para_CLK[0], _para_TRP[0],
+                          &_para_SION[0][message.sat_global_id], _para_AMB_RAW[message.amb_index]};
+                if (drop_amb)
+                    drop_set.push_back(4);
+            }
+            else
+            {
+                double *isb = is_gal ? _para_ISB_GAL[0] :
+					(is_bds ? _para_ISB_BDS[0] :
+					 (is_glo ? _para_ISB_GLO[0] : _para_ISB_QZS[0]));
+                cost = new MultiCarrierphaseRAWFactor(message, params_temp, _gbias_model);
+                blocks = {_para_CRD[0], _para_CLK[0], _para_TRP[0],
+                          &_para_SION[0][message.sat_global_id], isb,
+                          _para_AMB_RAW[message.amb_index]};
+                drop_set.push_back(4); // ISB
+                if (drop_amb)
+                    drop_set.push_back(5);
+            }
+        }
+
+        if (cost)
+        {
+            gnss_marginalization_info->addResidualBlockInfo(
+                new GNSSResidualBlockInfo(cost,
+                                          message.obs_type == TYPE_L ? loss_function_cp : loss_function,
+                                          blocks, drop_set));
+        }
+    };
+
+    const t_gallpar params_temp(_para_window[0]);
+    for (const auto &message : _vRAW_msg[0])
+        add_raw_factor(message, params_temp);
+
+    // Preserve a genuine SION arc-start prior when node 0 leaves the
+    // window.  The prior is itself marginalized with the outgoing SION
+    // block, so it remains part of the carried GNSS prior after the marker
+    // shifts out of _raw_sion_initial_nodes.
+    for (const int sat_id : _raw_sion_initial_nodes[0])
+    {
+        if (sat_id < 0 || sat_id >= NUM_OF_ARC)
+            continue;
+
+        bool present_at_node0 = false;
+        for (const auto &message : _vRAW_msg[0])
+        {
+            if (message.sat_global_id == sat_id)
+            {
+                present_at_node0 = true;
+                break;
+            }
+        }
+        if (!present_at_node0)
+            continue;
+
+        gnss_marginalization_info->addResidualBlockInfo(
+            new GNSSResidualBlockInfo(
+                new InitialFactor(0.0, 1.0 / _sig_init_vion), nullptr,
+                vector<double *>{&_para_SION[0][sat_id]}, vector<int>{0}));
+    }
+
+    // Carry the dynamic states from node 1 into the next window node 0.
+    // The process factors themselves are part of the marginalization system,
+    // so their outgoing endpoint is eliminated together with node 0.
+    const double graph_dt = std::fabs(_headers[1] - _headers[0]);
+    if (graph_dt > 0.0 && std::isfinite(graph_dt))
+    {
+        if (_trpStoModel)
+        {
+            const double q = graph_interval_random_walk_q(_trpStoModel, graph_dt);
+            if (q > 0.0 && std::isfinite(q))
+                gnss_marginalization_info->addResidualBlockInfo(
+                    new GNSSResidualBlockInfo(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+                                              vector<double *>{_para_TRP[0], _para_TRP[1]}, vector<int>{0}));
+        }
+
+        if (!_lost_isb_GAL[0] && !_lost_isb_GAL[1] && _galStoModel)
+        {
+            const double q = graph_interval_random_walk_q(_galStoModel, graph_dt);
+            if (q > 0.0 && std::isfinite(q))
+                gnss_marginalization_info->addResidualBlockInfo(
+                    new GNSSResidualBlockInfo(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+                                              vector<double *>{_para_ISB_GAL[0], _para_ISB_GAL[1]}, vector<int>{0}));
+        }
+        if (!_lost_isb_BDS[0] && !_lost_isb_BDS[1] && _bdsStoModel)
+        {
+            const double q = graph_interval_random_walk_q(_bdsStoModel, graph_dt);
+            if (q > 0.0 && std::isfinite(q))
+                gnss_marginalization_info->addResidualBlockInfo(
+                    new GNSSResidualBlockInfo(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+                                              vector<double *>{_para_ISB_BDS[0], _para_ISB_BDS[1]}, vector<int>{0}));
+        }
+        if (!_lost_isb_GLO[0] && !_lost_isb_GLO[1] && _gloStoModel)
+        {
+            const double q = graph_interval_random_walk_q(_gloStoModel, graph_dt);
+            if (q > 0.0 && std::isfinite(q))
+                gnss_marginalization_info->addResidualBlockInfo(
+                    new GNSSResidualBlockInfo(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+                                                  vector<double *>{_para_ISB_GLO[0], _para_ISB_GLO[1]}, vector<int>{0}));
+        }
+		if (!_lost_isb_QZS[0] && !_lost_isb_QZS[1] && _qzsStoModel)
+		{
+			const double q = graph_interval_random_walk_q(_qzsStoModel, graph_dt);
+			if (q > 0.0 && std::isfinite(q))
+				gnss_marginalization_info->addResidualBlockInfo(
+					new GNSSResidualBlockInfo(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+												  vector<double *>{_para_ISB_QZS[0], _para_ISB_QZS[1]}, vector<int>{0}));
+		}
+
+        if (_ionStoModel && _vRAW_msg.size() > 1)
+        {
+            const double q = graph_interval_random_walk_q(_ionStoModel, graph_dt);
+            if (q > 0.0 && std::isfinite(q))
+            {
+                set<int> node0_sats;
+                set<int> node1_sats;
+                for (const auto &message : _vRAW_msg[0])
+                    if (message.sat_global_id >= 0 && message.sat_global_id < NUM_OF_ARC)
+                        node0_sats.insert(message.sat_global_id);
+                for (const auto &message : _vRAW_msg[1])
+                    if (message.sat_global_id >= 0 && message.sat_global_id < NUM_OF_ARC)
+                        node1_sats.insert(message.sat_global_id);
+                for (int sat_id : node0_sats)
+                {
+                    if (node1_sats.count(sat_id) == 0)
+                        continue;
+                    gnss_marginalization_info->addResidualBlockInfo(
+                        new GNSSResidualBlockInfo(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+                                                  vector<double *>{&_para_SION[0][sat_id], &_para_SION[1][sat_id]},
+                                                  vector<int>{0}));
+                }
+            }
+        }
+    }
+
+    if (gnss_marginalization_info->factors.empty())
+    {
+        delete gnss_marginalization_info;
+        if (_last_gnss_marginalization_info)
+            delete _last_gnss_marginalization_info;
+        _last_gnss_marginalization_info = nullptr;
+        _last_gnss_marginalization_para_blocks.clear();
+        return;
+    }
+
+    gnss_marginalization_info->preMarginalize();
+    gnss_marginalization_info->marginalize();
+    if (!gnss_marginalization_info->valid)
+    {
+        delete gnss_marginalization_info;
+        if (_last_gnss_marginalization_info)
+            delete _last_gnss_marginalization_info;
+        _last_gnss_marginalization_info = nullptr;
+        _last_gnss_marginalization_para_blocks.clear();
+        return;
+    }
+
+    unordered_map<long, double *> addr_shift;
+    addr_shift[reinterpret_cast<long>(_para_TRP[1])] = _para_TRP[0];
+    addr_shift[reinterpret_cast<long>(_para_ISB_GAL[1])] = _para_ISB_GAL[0];
+    addr_shift[reinterpret_cast<long>(_para_ISB_BDS[1])] = _para_ISB_BDS[0];
+    addr_shift[reinterpret_cast<long>(_para_ISB_GLO[1])] = _para_ISB_GLO[0];
+    addr_shift[reinterpret_cast<long>(_para_ISB_QZS[1])] = _para_ISB_QZS[0];
+    for (int sat_id = 0; sat_id < NUM_OF_ARC; ++sat_id)
+        addr_shift[reinterpret_cast<long>(&_para_SION[1][sat_id])] = &_para_SION[0][sat_id];
+    for (int amb_id = 0; amb_id < NUM_OF_ARC; ++amb_id)
+        addr_shift[reinterpret_cast<long>(_para_AMB_RAW[amb_id])] = _para_AMB_RAW[amb_id];
+
+    // Every retained block must have an explicit address.  The fallback is
+    // safe for current-window scalar blocks and prevents a null block from
+    // reaching Ceres when a satellite disappears between two nodes.
+    for (const auto &block : gnss_marginalization_info->parameter_block_idx)
+    {
+        if (block.second >= gnss_marginalization_info->m && addr_shift.find(block.first) == addr_shift.end())
+            addr_shift[block.first] = reinterpret_cast<double *>(block.first);
+    }
+
+    vector<double *> parameter_blocks = gnss_marginalization_info->getParameterBlocks(addr_shift);
+    if (_last_gnss_marginalization_info)
+        delete _last_gnss_marginalization_info;
+    _last_gnss_marginalization_info = gnss_marginalization_info;
+    _last_gnss_marginalization_para_blocks = parameter_blocks;
+}
+
 int gfgomsf::t_gpvtfgo::_gobs_outlier_detection(pair<string, int> & outlier)
 {
+	if (!_last_gnss_info || !_last_gnss_info->valid)
+	{
+		_raw_outlier_index = -1;
+		outlier = make_pair(" ", -1);
+		return -1;
+	}
+
+	if (!_isBase && _observ == OBSCOMBIN::RAW_ALL)
+	{
+		int idx = -1;
+		double max_norm = 0.0;
+		for (int i = 0; i < _last_gnss_info->v_norm.rows(); ++i)
+		{
+			if (fabs(_last_gnss_info->v_norm(i)) > max_norm &&
+				fabs(_last_gnss_info->v_norm(i)) > _max_res_norm)
+			{
+				max_norm = fabs(_last_gnss_info->v_norm(i));
+				idx = i;
+			}
+		}
+		if (idx < 0 || idx >= static_cast<int>(_raw_obs_index.size()))
+		{
+			_raw_outlier_index = -1;
+			outlier = make_pair(" ", -1);
+			return -1;
+		}
+
+		const RawObsIndex &obs = _raw_obs_index[idx];
+		_raw_outlier_index = idx;
+		outlier = make_pair(obs.sat, obs.sat_global_id);
+		if (find_if(_removed_sats.begin(), _removed_sats.end(),
+				[&outlier](const pair<string, int> &item) { return item.second == outlier.second; }) == _removed_sats.end())
+			_removed_sats.push_back(outlier);
+		if (_spdlog)
+			_spdlog->warn("PPP RAW outlier {} {} freq {} normalized residual {:.3f}",
+				obs.sat, gobs2str(obs.obs), static_cast<int>(obs.freq), max_norm);
+		return idx;
+	}
+
 	pair<string, int> sat_id;
 	int idx = -1;
 	if (_last_gnss_info->valid)
@@ -3071,6 +4371,305 @@ void gfgomsf::t_gpvtfgo::_posteriori_test(ceres::Problem& problem)
 
 
 
+
+void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
+{
+    _all_para_win.delAllParam();
+    _parameter_blocks.clear();
+    _raw_obs_index.clear();
+
+    GNSSInfo *gnss_info = new GNSSInfo();
+    ceres::LossFunction *loss_function = new ceres::HuberLoss(_loss_func_value);
+    ceres::LossFunction *loss_function_cp = new ceres::HuberLoss(_loss_func_value);
+    map<long, vector<t_gpar>> descriptors;
+    map<long, double *> parameter_addresses;
+    bool parameter_addresses_consistent = true;
+
+    auto make_parameter = [&](par_type type, const string &prn, double value,
+                              bool arc) -> t_gpar
+    {
+        t_gpar parameter(_site, type, 1, prn);
+        parameter.value(value);
+        parameter.apriori(value);
+        parameter.setTime(_epoch, arc ? LAST_TIME : _epoch);
+        return parameter;
+    };
+    auto make_arc_parameter = [&](par_type type, const string &prn,
+                                  double value, const t_gtime &arc_beg,
+                                  const t_gtime &arc_end) -> t_gpar
+    {
+        t_gpar parameter = make_parameter(type, prn, value, true);
+        parameter.setTime(arc_beg, arc_end);
+        return parameter;
+    };
+    auto register_descriptor = [&](double *address, const vector<t_gpar> &parameters)
+    {
+        if (descriptors.find(reinterpret_cast<long>(address)) == descriptors.end())
+            descriptors[reinterpret_cast<long>(address)] = parameters;
+    };
+    auto register_parameter_addresses = [&](const vector<double *> &blocks)
+    {
+        for (double *address : blocks)
+        {
+            const long key = reinterpret_cast<long>(address);
+            auto it = parameter_addresses.find(key);
+            if (it == parameter_addresses.end())
+                parameter_addresses[key] = address;
+            else if (it->second != address)
+                parameter_addresses_consistent = false;
+        }
+    };
+    auto ambiguity_type = [](FREQ_SEQ freq) -> par_type
+    {
+        switch (freq)
+        {
+        case FREQ_1: return par_type::AMB_L1;
+        case FREQ_2: return par_type::AMB_L2;
+        case FREQ_3: return par_type::AMB_L3;
+        case FREQ_4: return par_type::AMB_L4;
+        case FREQ_5: return par_type::AMB_L5;
+        default: return par_type::AMB_L1;
+        }
+    };
+
+    if (_vRAW_msg.size() != static_cast<size_t>(_rover_count + 1))
+    {
+        gnss_info->valid = false;
+        if (_last_gnss_info)
+            delete _last_gnss_info;
+        _last_gnss_info = gnss_info;
+        return;
+    }
+
+    for (int node = 0; node <= _rover_count; ++node)
+    {
+        const t_gallpar params_temp(_para_window[node]);
+        for (const auto &message : _vRAW_msg[node])
+        {
+            if (message.sat_global_id < 0 || message.sat_global_id >= NUM_OF_ARC)
+                continue;
+
+            const GSYS system = message.satdata.gsys();
+            const bool is_gps = system == GSYS::GPS;
+            const bool is_gal = system == GSYS::GAL && !_lost_isb_GAL[node];
+            const bool is_bds = system == GSYS::BDS && !_lost_isb_BDS[node];
+            const bool is_glo = system == GSYS::GLO && !_lost_isb_GLO[node];
+            const bool is_qzs = system == GSYS::QZS && !_lost_isb_QZS[node];
+            if (!is_gps && !is_gal && !is_bds && !is_glo && !is_qzs)
+                continue;
+
+            ceres::CostFunction *cost = nullptr;
+            vector<double *> blocks;
+            if (message.obs_type == TYPE_C)
+            {
+                if (is_gps)
+                {
+                    cost = new PseudorangeRAWFactor(message, params_temp, _gbias_model);
+                    blocks = {_para_CRD[node], _para_CLK[node], _para_TRP[node],
+                              &_para_SION[node][message.sat_global_id]};
+                }
+                else
+                {
+                    double *isb = is_gal ? _para_ISB_GAL[node] :
+						(is_bds ? _para_ISB_BDS[node] :
+						 (is_glo ? _para_ISB_GLO[node] : _para_ISB_QZS[node]));
+                    cost = new MultiPseudorangeRAWFactor(message, params_temp, _gbias_model);
+                    blocks = {_para_CRD[node], _para_CLK[node], _para_TRP[node],
+                              &_para_SION[node][message.sat_global_id], isb};
+                }
+            }
+            else if (message.obs_type == TYPE_L && message.amb_index >= 0 && message.amb_index < NUM_OF_ARC)
+            {
+                if (is_gps)
+                {
+                    cost = new CarrierphaseRAWFactor(message, params_temp, _gbias_model);
+                    blocks = {_para_CRD[node], _para_CLK[node], _para_TRP[node],
+                              &_para_SION[node][message.sat_global_id], _para_AMB_RAW[message.amb_index]};
+                }
+                else
+                {
+                    double *isb = is_gal ? _para_ISB_GAL[node] :
+						(is_bds ? _para_ISB_BDS[node] :
+						 (is_glo ? _para_ISB_GLO[node] : _para_ISB_QZS[node]));
+                    cost = new MultiCarrierphaseRAWFactor(message, params_temp, _gbias_model);
+                    blocks = {_para_CRD[node], _para_CLK[node], _para_TRP[node],
+                              &_para_SION[node][message.sat_global_id], isb,
+                              _para_AMB_RAW[message.amb_index]};
+                }
+            }
+            if (!cost)
+                continue;
+
+            GNSSResidualBlockInfo *residual_block = new GNSSResidualBlockInfo(
+                cost, message.obs_type == TYPE_L ? loss_function_cp : loss_function,
+                blocks);
+            register_parameter_addresses(blocks);
+            gnss_info->addResidualBlockInfo(residual_block, map<long, vector<int>>());
+
+            vector<t_gpar> crd_parameters;
+            crd_parameters.push_back(make_parameter(par_type::CRD_X, "", _para_CRD[node][0], false));
+            crd_parameters.push_back(make_parameter(par_type::CRD_Y, "", _para_CRD[node][1], false));
+            crd_parameters.push_back(make_parameter(par_type::CRD_Z, "", _para_CRD[node][2], false));
+            register_descriptor(blocks[0], crd_parameters);
+            register_descriptor(blocks[1], {make_parameter(par_type::CLK, "", _para_CLK[node][0], false)});
+            register_descriptor(blocks[2], {make_parameter(par_type::TRP, "", _para_TRP[node][0], false)});
+             register_descriptor(blocks[3], {make_parameter(par_type::SION, message.sat_id,
+                                                              _para_SION[node][message.sat_global_id], false)});
+
+            if (message.obs_type == TYPE_C && !is_gps)
+            {
+                register_descriptor(blocks[4], {make_parameter(raw_factor_detail::isbType(system), "",
+                                                                 is_gal ? _para_ISB_GAL[node][0] :
+						 (is_bds ? _para_ISB_BDS[node][0] :
+						  (is_glo ? _para_ISB_GLO[node][0] : _para_ISB_QZS[node][0])), false)});
+            }
+            else if (message.obs_type == TYPE_L)
+            {
+                int amb_block = is_gps ? 4 : 5;
+                if (!is_gps)
+                {
+                    register_descriptor(blocks[4], {make_parameter(raw_factor_detail::isbType(system), "",
+                                                                     is_gal ? _para_ISB_GAL[node][0] :
+							 (is_bds ? _para_ISB_BDS[node][0] :
+							  (is_glo ? _para_ISB_GLO[node][0] : _para_ISB_QZS[node][0])), false)});
+                }
+                t_gtime ambiguity_beg = message.time;
+                t_gtime ambiguity_end = LAST_TIME;
+                _ambRAW_manager->getArcTime(message.amb_index,
+                                            ambiguity_beg, ambiguity_end);
+                register_descriptor(blocks[amb_block],
+                                    {make_arc_parameter(ambiguity_type(message.freq),
+                                                        message.sat_id,
+                                                        _para_AMB_RAW[message.amb_index][0],
+                                                        ambiguity_beg,
+                                                        ambiguity_end)});
+            }
+
+            RawObsIndex index;
+            index.time = message.time;
+            index.sat = message.sat_id;
+            index.site = message.site;
+            index.obs_type = message.obs_type;
+            index.obs = message.obs;
+            index.freq = message.freq;
+            index.sat_global_id = message.sat_global_id;
+            index.amb_index = message.amb_index;
+			index.node = node;
+            _raw_obs_index.push_back(index);
+        }
+    }
+
+    if (gnss_info->factors.empty())
+    {
+        gnss_info->valid = false;
+        if (_last_gnss_info)
+            delete _last_gnss_info;
+        _last_gnss_info = gnss_info;
+        return;
+    }
+
+    int column = 0;
+    map<long, int> parameter_columns;
+    bool covariance_blocks_valid = parameter_addresses_consistent;
+    for (const auto &block : gnss_info->parameter_block_size)
+    {
+        const long address = block.first;
+        const int size = block.second;
+        parameter_columns[address] = column;
+        auto parameter_address = parameter_addresses.find(address);
+        if (parameter_address == parameter_addresses.end() ||
+            parameter_address->second == nullptr ||
+            !problem.HasParameterBlock(parameter_address->second) ||
+            problem.ParameterBlockSize(parameter_address->second) != size)
+            covariance_blocks_valid = false;
+        auto descriptor = descriptors.find(address);
+        if (descriptor == descriptors.end() || static_cast<int>(descriptor->second.size()) != size)
+        {
+            gnss_info->valid = false;
+            if (_last_gnss_info)
+                delete _last_gnss_info;
+            _last_gnss_info = gnss_info;
+            return;
+        }
+        for (auto parameter : descriptor->second)
+        {
+            parameter.index = _all_para_win.parNumber() + 1;
+            _all_para_win.addParam(parameter);
+        }
+        column += size;
+    }
+
+    for (size_t row = 0; row < gnss_info->factors.size(); ++row)
+    {
+        const auto &blocks = gnss_info->factors[row]->parameter_blocks;
+        for (double *address : blocks)
+        {
+            const long key = reinterpret_cast<long>(address);
+            auto parameter_column = parameter_columns.find(key);
+            if (parameter_column == parameter_columns.end())
+            {
+                covariance_blocks_valid = false;
+                continue;
+            }
+            gnss_info->para_index[row][key] = vector<int>{parameter_column->second};
+        }
+    }
+
+    // Use the covariance of the actual solved Ceres graph.  The problem
+    // already contains the carried marginalization prior, random walks,
+    // initial factors, and robust losses; passing its block covariance keeps
+    // those correlations in the normalized residual calculation.
+    vector<const double *> covariance_blocks;
+    covariance_blocks.reserve(gnss_info->parameter_block_size.size());
+    for (const auto &block : gnss_info->parameter_block_size)
+    {
+        auto parameter_address = parameter_addresses.find(block.first);
+        if (parameter_address == parameter_addresses.end() ||
+            parameter_address->second == nullptr ||
+            !problem.HasParameterBlock(parameter_address->second) ||
+            problem.ParameterBlockSize(parameter_address->second) != block.second)
+        {
+            covariance_blocks_valid = false;
+            break;
+        }
+        covariance_blocks.push_back(parameter_address->second);
+    }
+
+    bool covariance_ok = false;
+    Eigen::MatrixXd covariance_matrix;
+    if (covariance_blocks_valid && !covariance_blocks.empty())
+    {
+        ceres::Covariance::Options options_co;
+        options_co.algorithm_type = ceres::SPARSE_QR;
+        options_co.apply_loss_function = true;
+        ceres::Covariance covariance(options_co);
+        covariance_ok = covariance.Compute(covariance_blocks, &problem);
+        if (covariance_ok)
+        {
+            covariance_matrix = Eigen::MatrixXd::Zero(column, column);
+            covariance.GetCovarianceMatrix(covariance_blocks,
+                                           covariance_matrix.data());
+        }
+    }
+
+    if (covariance_ok)
+        gnss_info->constructEqu_fromCeres(covariance_matrix);
+    else
+    {
+        if (_spdlog)
+            _spdlog->warn(
+                covariance_blocks_valid
+                    ? "PPP FGO RAW: Ceres covariance unavailable; using the "
+                      "equation fallback for outlier normalization"
+                    : "PPP FGO RAW: parameter block association incomplete or "
+                      "inconsistent; using the equation fallback for outlier normalization");
+        gnss_info->constructEqu_fromCeres(Eigen::MatrixXd());
+    }
+
+    if (_last_gnss_info)
+        delete _last_gnss_info;
+    _last_gnss_info = gnss_info;
+}
 
 void gfgomsf::t_gpvtfgo::_posteriori_test_PPP(ceres::Problem& problem)
 {

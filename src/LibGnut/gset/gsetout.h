@@ -49,7 +49,8 @@ namespace gnut
         PPP_OUT,
         FLT_OUT,
         KML_OUT,
-        INS_OUT
+        INS_OUT,
+        FGO_OUT
 		
 
     };

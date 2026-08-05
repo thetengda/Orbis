@@ -33,6 +33,12 @@ int main(int argc, char** argv)
 	gset.app("G-Nut/PVT", "0.9.0", "$Rev: 2448 $", "(gnss@pecny.cz)", __DATE__, __TIME__);
 	// Get the arguments from the command line
 	gset.arg(argc, argv, true, false);
+	const OBSCOMBIN configured_obs_combination =
+		dynamic_cast<t_gsetproc *>(&gset)->obs_combin();
+	if (configured_obs_combination == OBSCOMBIN::RAW_ALL)
+		cout << "GREAT_PVTFGO: RAW_ALL selects the uncombined SION/RAW PPP graph.\n";
+	else if (configured_obs_combination == OBSCOMBIN::RAW_MIX)
+		cout << "GREAT_PVTFGO: RAW_MIX is currently unsupported by the FGO PPP graph; use IONO_FREE or RAW_ALL.\n";
 
 	// // ceshi
 	// cout << "after arg rndwk_ztd="
@@ -199,23 +205,17 @@ int main(int argc, char** argv)
 			// Note, gcoder contain the gdata and gio contain the gcoder
 			tgio->coder(tgcoder);
 
-			if (ifmt == UPD_INP )
-			{
-				gio.push_back(tgio);
-				gcoder.push_back(tgcoder);
-			}
-			else {
-				runepoch = t_gtime::current_time(t_gtime::GPS);
-				// Read the data from file here
-				tgio->run_read();
-				lstepoch = t_gtime::current_time(t_gtime::GPS); 
-				// Write the information of reading process to log file
-				SPDLOG_LOGGER_INFO(my_logger, "main", "READ: " + path + " time: "
-					+ dbl2str(lstepoch.diff(runepoch)) + " sec");
-				// Delete 
-				delete tgio;
-				delete tgcoder;
-			}
+			runepoch = t_gtime::current_time(t_gtime::GPS);
+			// UPD files are static products, just like SP3/CLK/BIAS.  They must
+			// be decoded before the ambiguity resolver is constructed; the old
+			// deferred branch only stored and later deleted the decoder without
+			// ever calling run_read().
+			tgio->run_read();
+			lstepoch = t_gtime::current_time(t_gtime::GPS);
+			SPDLOG_LOGGER_INFO(my_logger, "main", "READ: " + path + " time: "
+				+ dbl2str(lstepoch.diff(runepoch)) + " sec");
+			delete tgio;
+			delete tgcoder;
 
 		}
 	}

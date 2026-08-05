@@ -198,7 +198,7 @@ namespace gfgomsf
 		 * @brief Add new satellite with ambiguities
 		 * Initializes satellite tracking and creates ambiguity parameters
 		 */
-		void addNewSat(const t_gtime & cur_time, const int &rover_index, const int &sat_index, int &amb_index, const t_gsatdata &sat_data, t_gallpar params);	
+		bool addNewSat(const t_gtime & cur_time, const int &rover_index, const int &sat_index, int &amb_index, const t_gsatdata &sat_data, t_gallpar params);
 		/**
 		 * @brief Extend satellite tracking to new epoch
 		 * Updates all ambiguities for given satellite to include new rover epoch

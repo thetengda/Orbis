@@ -83,6 +83,7 @@ namespace gnut
   	_OFMT_supported.insert(PPP_OUT);
   	_OFMT_supported.insert(FLT_OUT);
   	_OFMT_supported.insert(KML_OUT);
+	_OFMT_supported.insert(FGO_OUT);
   }
 
   // Destructor

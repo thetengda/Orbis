@@ -162,7 +162,7 @@ void gfgomsf::t_gamb_manager::removeSat(const int &sat_global_id, const int &rov
 		}
 		if (is_new_sat)
 			_sat_map.erase(sat_global_id);
-		else
+		else if (!it->second->time_span.empty())
 		{
 			it->second->time_span.pop_back();
 		}
@@ -291,7 +291,8 @@ int gfgomsf::t_gamb_manager::get_last_epoch_sats(double time)
 	auto it = _sat_map.begin();
 	for (; it != _sat_map.end(); it++)
 	{
-		if (it->second->time_span.back() == time)
+		if (it->second && !it->second->time_span.empty() &&
+			it->second->time_span.back() == time)
 		{
 			cur_sats.push_back(make_pair(it->second->_sat_name, it->first));
 		}
@@ -386,7 +387,7 @@ int gfgomsf::t_gamb_manager::getAmbSearchIndex(const pair<int, FREQ_SEQ>& sat_fr
 		return -1;
 }
 
-void gfgomsf::t_gamb_manager::addNewSat(const t_gtime & cur_time, const int & rover_index, const int & sat_index, int & amb_index, const t_gsatdata & sat_data, t_gallpar params)
+bool gfgomsf::t_gamb_manager::addNewSat(const t_gtime & cur_time, const int & rover_index, const int & sat_index, int & amb_index, const t_gsatdata & sat_data, t_gallpar params)
 {
 	string sat_name = sat_data.sat();
 	GSYS gnss_system = sat_data.gsys();
@@ -410,7 +411,11 @@ void gfgomsf::t_gamb_manager::addNewSat(const t_gtime & cur_time, const int & ro
 	}
 	shared_ptr<t_gsat_map> cur_sat(new t_gsat_map(gnss_system, sat_name, obs_time.sow(), sat_index));
 	_sat_map[sat_index] = cur_sat;
-	addAmb(cur_time, amb_para_per_sat, gnss_system, rover_index, sat_index, amb_index);
+	const bool added = addAmb(cur_time, amb_para_per_sat, gnss_system,
+		rover_index, sat_index, amb_index);
+	if (!added)
+		_sat_map.erase(sat_index);
+	return added;
 }
 
 
@@ -480,7 +485,8 @@ int gfgomsf::t_gamb_manager::get_last_epoch_sats(double time)
 	auto it = _sat_map.begin();
 	for (; it != _sat_map.end(); it++)
 	{
-		if (it->second->time_span.back() == time)
+		if (it->second && !it->second->time_span.empty() &&
+			it->second->time_span.back() == time)
 		{
 			cur_sats.push_back(make_pair(it->second->_sat_name, it->first));
 		}
@@ -505,36 +511,54 @@ int gfgomsf::t_gamb_manager::get_sat_id(string prn)
 
 bool gfgomsf::t_gamb_manager::addAmb(const t_gtime & cur_time, vector<t_gpar> amb_para, const GSYS & gnss_system, int rover_index, const int & sat_index, int & amb_index)
 {
-	map<FREQ_SEQ, GOBSBAND> crt_bands = _band_index[gnss_system];
-	string sat_name = amb_para[0].prn;
-
-	if (amb_para.size() > 0)
+	if (amb_para.empty())
 	{
-		for (int i = 0; i < amb_para.size(); i++)
-		{
-			amb_index++;
-			FREQ_SEQ freq = ambtype_list[amb_para[i].parType];
-			GOBSBAND band = crt_bands[freq];
-			pair<FREQ_SEQ, GOBSBAND> freq_band = make_pair(freq, band);
-			double sd_amb_value = amb_para[i].value();
-			shared_ptr<t_gamb_per_ID> amb_i(new t_gamb_per_ID(freq_band, gnss_system, sat_name, sat_index, amb_index, rover_index, sd_amb_value));
-			amb_i->setBeg(cur_time);
-			_ambiguity[amb_index] = amb_i;
-			_sat_map[sat_index]->_amb_ids.push_back(amb_index);
-			ambiguity_ids.push_back(amb_index);			
-		}
-	}
-	else
-	{
-		cout << "sat %s has no amb para!!!" << sat_name << endl;
+		cout << "sat id " << sat_index << " has no amb para!!!" << endl;
 		return false;
 	}
 
-	return true;
+	auto sat_it = _sat_map.find(sat_index);
+	if (sat_it == _sat_map.end() || !sat_it->second)
+	{
+		cout << "sat id " << sat_index << " has no satellite map!!!" << endl;
+		return false;
+	}
+
+	auto band_it = _band_index.find(gnss_system);
+	if (band_it == _band_index.end())
+		return false;
+	const map<FREQ_SEQ, GOBSBAND> &crt_bands = band_it->second;
+	const string sat_name = amb_para.front().prn;
+	bool added = false;
+	for (const auto &parameter : amb_para)
+	{
+		auto freq_it = ambtype_list.find(parameter.parType);
+		if (freq_it == ambtype_list.end())
+			continue;
+		auto current_band = crt_bands.find(freq_it->second);
+		if (current_band == crt_bands.end())
+			continue;
+
+		amb_index++;
+		pair<FREQ_SEQ, GOBSBAND> freq_band = make_pair(freq_it->second, current_band->second);
+		double sd_amb_value = parameter.value();
+		shared_ptr<t_gamb_per_ID> amb_i(new t_gamb_per_ID(freq_band, gnss_system, sat_name, sat_index, amb_index, rover_index, sd_amb_value));
+		amb_i->setBeg(cur_time);
+		amb_i->setEnd(LAST_TIME);
+		_ambiguity[amb_index] = amb_i;
+		sat_it->second->_amb_ids.push_back(amb_index);
+		ambiguity_ids.push_back(amb_index);
+		added = true;
+	}
+
+	return added;
 }
 
 void gfgomsf::t_gamb_manager::addGpara(t_gallpar & params, const int & idx, double value)
 {
+	if (params.parNumber() <= 0)
+		return;
+
 	for (auto it : _ambiguity)
 	{
 		if (it.first == idx)

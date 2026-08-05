@@ -44,6 +44,8 @@ namespace gnut
             return KML_OUT;
         if (tmp == "INS")
             return INS_OUT;
+        if (tmp == "FGO")
+            return FGO_OUT;
         return OFMT(-1);
     }
 
@@ -59,6 +61,8 @@ namespace gnut
             return "PPP";
         case FLT_OUT:
             return "FLT";
+        case FGO_OUT:
+            return "FGO";
         default:
             return "UNDEF";
         }

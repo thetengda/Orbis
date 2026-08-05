@@ -11,6 +11,8 @@
 
 #include"gfgo_estimator.h"
 
+#include <cstring>
+
 namespace gfgo
 {
 	t_gfgo::t_gfgo(t_gsetbase * set):
@@ -31,6 +33,9 @@ namespace gfgo
 		if (_last_marginalization_info != nullptr) delete _last_marginalization_info;		
 		_last_marginalization_info = nullptr;		
 		_last_marginalization_parameter_blocks.clear();
+		std::memset(_para_ISB_QZS, 0, sizeof(_para_ISB_QZS));
+		std::memset(_para_AMB_RAW, 0, sizeof(_para_AMB_RAW));
+		std::memset(_para_SION, 0, sizeof(_para_SION));
 	}
 	
 }
