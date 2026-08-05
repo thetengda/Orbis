@@ -212,7 +212,7 @@ namespace gfgomsf
 		vector<pair<string, int>> _removed_sats;	
 		bool _batch_remove = false;
 		bool _initial_prior = true;
-		std::unordered_map<long, int> amb_idx;	
+		std::unordered_map<ParameterBlockKey, int> amb_idx;
 
 
 
@@ -224,7 +224,7 @@ namespace gfgomsf
 		GNSSInfo *_last_gnss_info = nullptr;                             ///save gnss equ
 		GNSSInfo *_last_gnss_marginalization_info = nullptr;             ///for gnss marginalization
 		vector<double *> _last_gnss_marginalization_para_blocks;
-		std::unordered_map<long, int> all_parameter_block; /// block to store info of last marginalized parameters
+		std::unordered_map<ParameterBlockKey, int> all_parameter_block; /// block to store info of last marginalized parameters
 	protected:	
 		void _prepare_equ();
 		virtual bool _update_all_equ();

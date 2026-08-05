@@ -2188,18 +2188,18 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			//TicToc t_margin;
 			marginalization_info->marginalize();
 			//printf("marginalization %f ms\n", t_margin.toc());
-			std::map<long, double*> addr_shift;
+			std::map<std::uintptr_t, double*> addr_shift;
 			for (int i = 1; i <= _rover_count; i++)
 			{
-				addr_shift[reinterpret_cast<long>(_para_pose[i])] = _para_pose[i - 1];
+				addr_shift[reinterpret_cast<std::uintptr_t>(_para_pose[i])] = _para_pose[i - 1];
 				if (_imu_enable)
-					addr_shift[reinterpret_cast<long>(_para_speed_bias[i])] = _para_speed_bias[i - 1];
+					addr_shift[reinterpret_cast<std::uintptr_t>(_para_speed_bias[i])] = _para_speed_bias[i - 1];
 			}
 			//gnss
 			vector<int> cur_amb = _amb_manager->getCurWinAmb();
 			for (int i = 0; i < cur_amb.size(); i++)
 			{
-				addr_shift[reinterpret_cast<long>(_para_amb[cur_amb[i]])] = _para_amb[cur_amb[i]];
+				addr_shift[reinterpret_cast<std::uintptr_t>(_para_amb[cur_amb[i]])] = _para_amb[cur_amb[i]];
 			}
 
 			vector<double*> parameter_blocks = marginalization_info->getParameterBlocks(addr_shift); /// reserved parameters
@@ -2623,31 +2623,31 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization_PPP() {
 			marginalization_info->preMarginalize();
 			marginalization_info->marginalize();
 
-			std::map<long, double*> addr_shift;
+			std::map<std::uintptr_t, double*> addr_shift;
 
 			for (int i = 1; i <= _rover_count; i++)
 			{
-				addr_shift[reinterpret_cast<long>(_para_pose[i])] = _para_pose[i - 1];
+				addr_shift[reinterpret_cast<std::uintptr_t>(_para_pose[i])] = _para_pose[i - 1];
 
 				if (_imu_enable)
-					addr_shift[reinterpret_cast<long>(_para_speed_bias[i])] = _para_speed_bias[i - 1];
+					addr_shift[reinterpret_cast<std::uintptr_t>(_para_speed_bias[i])] = _para_speed_bias[i - 1];
 
-				addr_shift[reinterpret_cast<long>(_para_TRP[i])] = _para_TRP[i - 1];
+				addr_shift[reinterpret_cast<std::uintptr_t>(_para_TRP[i])] = _para_TRP[i - 1];
 
 				if (!_lost_isb_GAL[i - 1] && !_lost_isb_GAL[i])
-					addr_shift[reinterpret_cast<long>(_para_ISB_GAL[i])] = _para_ISB_GAL[i - 1];
+					addr_shift[reinterpret_cast<std::uintptr_t>(_para_ISB_GAL[i])] = _para_ISB_GAL[i - 1];
 
 				if (!_lost_isb_BDS[i - 1] && !_lost_isb_BDS[i])
-					addr_shift[reinterpret_cast<long>(_para_ISB_BDS[i])] = _para_ISB_BDS[i - 1];
+					addr_shift[reinterpret_cast<std::uintptr_t>(_para_ISB_BDS[i])] = _para_ISB_BDS[i - 1];
 
 				if (!_lost_isb_GLO[i - 1] && !_lost_isb_GLO[i])
-					addr_shift[reinterpret_cast<long>(_para_ISB_GLO[i])] = _para_ISB_GLO[i - 1];
+					addr_shift[reinterpret_cast<std::uintptr_t>(_para_ISB_GLO[i])] = _para_ISB_GLO[i - 1];
 			}
 
 			vector<int> cur_amb = _ambIF_manager->getCurWinAmb();
 			for (int i = 0; i < cur_amb.size(); i++)
 			{
-				addr_shift[reinterpret_cast<long>(_para_AMB_IF[cur_amb[i]])] = _para_AMB_IF[cur_amb[i]];
+				addr_shift[reinterpret_cast<std::uintptr_t>(_para_AMB_IF[cur_amb[i]])] = _para_AMB_IF[cur_amb[i]];
 			}
 
 			vector<double*> parameter_blocks = marginalization_info->getParameterBlocks(addr_shift);
@@ -2853,8 +2853,8 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test(ceres::Problem& problem)
 				{
 					PseudorangeDDINGFactor* pinsf = new PseudorangeDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
 					GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(pinsf, NULL, vector<double*> {_para_pose[i]});
-					map<long, vector<int>> para_index;
-					para_index[reinterpret_cast<long>(_para_pose[i])] = pose_para_col_index[0];
+					map<ParameterBlockKey, vector<int>> para_index;
+					para_index[reinterpret_cast<ParameterBlockKey>(_para_pose[i])] = pose_para_col_index[0];
 					gnss_info->addResidualBlockInfo(residual_block_info, para_index);
 				}
 				if (obstype == GOBSTYPE::TYPE_L)
@@ -2881,13 +2881,13 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test(ceres::Problem& problem)
 							_parameter_blocks.push_back(_para_amb[amb_id]);
 						}
 					}
-					map<long, vector<int>> para_index;
+					map<ParameterBlockKey, vector<int>> para_index;
 					//cout << "para_col_index: " << para_col_index.size() << " id1: " << _rover_count + 1+ id1 << " id2: " << _rover_count + 1+id2 << endl;
 					double* addr1 = _para_amb[amb_id12[0]];
 					double* addr2 = _para_amb[amb_id12[1]];
-					para_index[reinterpret_cast<long>(_para_pose[i])] = pose_para_col_index[0];
-					para_index[reinterpret_cast<long>(addr1)] = vector<int>{ amb_col_id[amb_id12[0]] };
-					para_index[reinterpret_cast<long>(addr2)] = vector<int>{ amb_col_id[amb_id12[1]] };
+					para_index[reinterpret_cast<ParameterBlockKey>(_para_pose[i])] = pose_para_col_index[0];
+					para_index[reinterpret_cast<ParameterBlockKey>(addr1)] = vector<int>{ amb_col_id[amb_id12[0]] };
+					para_index[reinterpret_cast<ParameterBlockKey>(addr2)] = vector<int>{ amb_col_id[amb_id12[1]] };
 					CarrierphaseDDINGFactor* linsf = new CarrierphaseDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
 					GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(linsf, NULL, vector<double*> {_para_pose[i], _para_amb[amb_id12[0]], _para_amb[amb_id12[1]]});
 					gnss_info->addResidualBlockInfo(residual_block_info, para_index);
@@ -3152,10 +3152,10 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 
 		if (obstype == GOBSTYPE::TYPE_C)
 		{
-			map<long, vector<int>> para_index;
-			para_index[reinterpret_cast<long>(_para_pose[_rover_count])] = pose_para_col_index[0];
-			para_index[reinterpret_cast<long>(_para_CLK[_rover_count])] = clk_para_col_index[0];
-			para_index[reinterpret_cast<long>(_para_TRP[_rover_count])] = trp_para_col_index[0];
+			map<ParameterBlockKey, vector<int>> para_index;
+			para_index[reinterpret_cast<ParameterBlockKey>(_para_pose[_rover_count])] = pose_para_col_index[0];
+			para_index[reinterpret_cast<ParameterBlockKey>(_para_CLK[_rover_count])] = clk_para_col_index[0];
+			para_index[reinterpret_cast<ParameterBlockKey>(_para_TRP[_rover_count])] = trp_para_col_index[0];
 
 			if (gsys == GSYS::GPS)
 			{
@@ -3176,7 +3176,7 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 					if_iter.time, if_iter.site, params_temp, if_iter.satdata,
 					_gbias_model, freq_band1, freq_band2, lever);
 
-				para_index[reinterpret_cast<long>(_para_ISB_GAL[_rover_count])] = isb_gal_para_col_index[0];
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_GAL[_rover_count])] = isb_gal_para_col_index[0];
 
 				GNSSResidualBlockInfo* residual_block_info =
 					new GNSSResidualBlockInfo(pf, loss_function,
@@ -3191,7 +3191,7 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 					if_iter.time, if_iter.site, params_temp, if_iter.satdata,
 					_gbias_model, freq_band1, freq_band2, lever);
 
-				para_index[reinterpret_cast<long>(_para_ISB_BDS[_rover_count])] = isb_bds_para_col_index[0];
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_BDS[_rover_count])] = isb_bds_para_col_index[0];
 
 				GNSSResidualBlockInfo* residual_block_info =
 					new GNSSResidualBlockInfo(pf, loss_function,
@@ -3206,7 +3206,7 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 					if_iter.time, if_iter.site, params_temp, if_iter.satdata,
 					_gbias_model, freq_band1, freq_band2, lever);
 
-				para_index[reinterpret_cast<long>(_para_ISB_GLO[_rover_count])] = isb_glo_para_col_index[0];
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_GLO[_rover_count])] = isb_glo_para_col_index[0];
 
 				GNSSResidualBlockInfo* residual_block_info =
 					new GNSSResidualBlockInfo(pf, loss_function,
@@ -3233,11 +3233,11 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 				parameter_blocks.push_back(_para_AMB_IF[amb_id]);
 			}
 
-			map<long, vector<int>> para_index;
-			para_index[reinterpret_cast<long>(_para_pose[_rover_count])] = pose_para_col_index[0];
-			para_index[reinterpret_cast<long>(_para_CLK[_rover_count])] = clk_para_col_index[0];
-			para_index[reinterpret_cast<long>(_para_TRP[_rover_count])] = trp_para_col_index[0];
-			para_index[reinterpret_cast<long>(_para_AMB_IF[amb_id])] = vector<int>{ amb_col_id[amb_id] };
+			map<ParameterBlockKey, vector<int>> para_index;
+			para_index[reinterpret_cast<ParameterBlockKey>(_para_pose[_rover_count])] = pose_para_col_index[0];
+			para_index[reinterpret_cast<ParameterBlockKey>(_para_CLK[_rover_count])] = clk_para_col_index[0];
+			para_index[reinterpret_cast<ParameterBlockKey>(_para_TRP[_rover_count])] = trp_para_col_index[0];
+			para_index[reinterpret_cast<ParameterBlockKey>(_para_AMB_IF[amb_id])] = vector<int>{ amb_col_id[amb_id] };
 
 			if (gsys == GSYS::GPS)
 			{
@@ -3258,7 +3258,7 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 					if_iter.time, if_iter.site, params_temp, if_iter.satdata,
 					_gbias_model, freq_band1, freq_band2, lever);
 
-				para_index[reinterpret_cast<long>(_para_ISB_GAL[_rover_count])] = isb_gal_para_col_index[0];
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_GAL[_rover_count])] = isb_gal_para_col_index[0];
 
 				GNSSResidualBlockInfo* residual_block_info =
 					new GNSSResidualBlockInfo(lf, loss_function_CP,
@@ -3273,7 +3273,7 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 					if_iter.time, if_iter.site, params_temp, if_iter.satdata,
 					_gbias_model, freq_band1, freq_band2, lever);
 
-				para_index[reinterpret_cast<long>(_para_ISB_BDS[_rover_count])] = isb_bds_para_col_index[0];
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_BDS[_rover_count])] = isb_bds_para_col_index[0];
 
 				GNSSResidualBlockInfo* residual_block_info =
 					new GNSSResidualBlockInfo(lf, loss_function_CP,
@@ -3288,7 +3288,7 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 					if_iter.time, if_iter.site, params_temp, if_iter.satdata,
 					_gbias_model, freq_band1, freq_band2, lever);
 
-				para_index[reinterpret_cast<long>(_para_ISB_GLO[_rover_count])] = isb_glo_para_col_index[0];
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_GLO[_rover_count])] = isb_glo_para_col_index[0];
 
 				GNSSResidualBlockInfo* residual_block_info =
 					new GNSSResidualBlockInfo(lf, loss_function_CP,

@@ -115,13 +115,13 @@ namespace gfgo
 		{
 			double *addr = parameter_blocks[i];
 			int size = parameter_block_sizes[i];
-			parameter_block_size[reinterpret_cast<long>(addr)] = size;
+			parameter_block_size[reinterpret_cast<std::uintptr_t>(addr)] = size;
 		}
 
 		for (int i = 0; i < static_cast<int>(residual_block_info->drop_set.size()); i++)
 		{
 			double *addr = parameter_blocks[residual_block_info->drop_set[i]];
-			parameter_block_idx[reinterpret_cast<long>(addr)] = 0;
+			parameter_block_idx[reinterpret_cast<std::uintptr_t>(addr)] = 0;
 		}
 	}
 
@@ -134,7 +134,7 @@ namespace gfgo
 			std::vector<int> block_sizes = it->cost_function->parameter_block_sizes();
 			for (int i = 0; i < static_cast<int>(block_sizes.size()); i++)
 			{
-				long addr = reinterpret_cast<long>(it->parameter_blocks[i]);
+				const std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(it->parameter_blocks[i]);
 				int size = block_sizes[i];
 				if (parameter_block_data.find(addr) == parameter_block_data.end())
 				{
@@ -163,15 +163,15 @@ namespace gfgo
 		{
 			for (int i = 0; i < static_cast<int>(it->parameter_blocks.size()); i++)
 			{
-				int idx_i = p->parameter_block_idx[reinterpret_cast<long>(it->parameter_blocks[i])];
-				int size_i = p->parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[i])];
+				int idx_i = p->parameter_block_idx[reinterpret_cast<std::uintptr_t>(it->parameter_blocks[i])];
+				int size_i = p->parameter_block_size[reinterpret_cast<std::uintptr_t>(it->parameter_blocks[i])];
 				if (size_i == 7)
 					size_i = 6;
 				Eigen::MatrixXd jacobian_i = it->jacobians[i].leftCols(size_i);
 				for (int j = i; j < static_cast<int>(it->parameter_blocks.size()); j++)
 				{
-					int idx_j = p->parameter_block_idx[reinterpret_cast<long>(it->parameter_blocks[j])];
-					int size_j = p->parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[j])];
+					int idx_j = p->parameter_block_idx[reinterpret_cast<std::uintptr_t>(it->parameter_blocks[j])];
+					int size_j = p->parameter_block_size[reinterpret_cast<std::uintptr_t>(it->parameter_blocks[j])];
 					if (size_j == 7)
 						size_j = 6;
 					Eigen::MatrixXd jacobian_j = it->jacobians[j].leftCols(size_j);
@@ -228,13 +228,13 @@ namespace gfgo
 		{
 			for (int i = 0; i < static_cast<int>(it->parameter_blocks.size()); i++)
 			{
-				int idx_i = parameter_block_idx[reinterpret_cast<long>(it->parameter_blocks[i])];
-				int size_i = localSize(parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[i])]);
+				int idx_i = parameter_block_idx[reinterpret_cast<std::uintptr_t>(it->parameter_blocks[i])];
+				int size_i = localSize(parameter_block_size[reinterpret_cast<std::uintptr_t>(it->parameter_blocks[i])]);
 				Eigen::MatrixXd jacobian_i = it->jacobians[i].leftCols(size_i);
 				for (int j = i; j < static_cast<int>(it->parameter_blocks.size()); j++)
 				{
-					int idx_j = parameter_block_idx[reinterpret_cast<long>(it->parameter_blocks[j])];
-					int size_j = localSize(parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[j])]);
+					int idx_j = parameter_block_idx[reinterpret_cast<std::uintptr_t>(it->parameter_blocks[j])];
+					int size_j = localSize(parameter_block_size[reinterpret_cast<std::uintptr_t>(it->parameter_blocks[j])]);
 					Eigen::MatrixXd jacobian_j = it->jacobians[j].leftCols(size_j);
 					if (i == j)
 						A.block(idx_i, idx_j, size_i, size_j) += jacobian_i.transpose() * jacobian_j;
@@ -324,7 +324,7 @@ namespace gfgo
 		//      (linearized_jacobians.transpose() * linearized_residuals - b).sum());
 	}
 
-	std::vector<double *> MarginalizationInfo::getParameterBlocks(std::map<long, double *> &addr_shift)
+	std::vector<double *> MarginalizationInfo::getParameterBlocks(std::map<std::uintptr_t, double *> &addr_shift)
 	{
 		std::vector<double *> keep_block_addr;
 		keep_block_size.clear();
@@ -335,10 +335,21 @@ namespace gfgo
 		{
 			if (it.second >= m)
 			{
+				const auto shifted = addr_shift.find(it.first);
+				if (shifted == addr_shift.end() || shifted->second == nullptr)
+				{
+					valid = false;
+					keep_block_size.clear();
+					keep_block_idx.clear();
+					keep_block_data.clear();
+					keep_block_addr.clear();
+					sum_block_size = 0;
+					return keep_block_addr;
+				}
 				keep_block_size.push_back(parameter_block_size[it.first]);
 				keep_block_idx.push_back(parameter_block_idx[it.first]);
 				keep_block_data.push_back(parameter_block_data[it.first]);
-				keep_block_addr.push_back(addr_shift[it.first]);
+				keep_block_addr.push_back(shifted->second);
 			}
 		}
 		sum_block_size = std::accumulate(std::begin(keep_block_size), std::end(keep_block_size), 0);
@@ -364,9 +375,9 @@ namespace gfgo
 		//for (int i = 0; i < static_cast<int>(keep_block_size.size()); i++)
 		//{
 		//    //printf("unsigned %x\n", reinterpret_cast<unsigned long>(parameters[i]));
-		//    //printf("signed %x\n", reinterpret_cast<long>(parameters[i]));
-		//printf("jacobian %x\n", reinterpret_cast<long>(jacobians));
-		//printf("residual %x\n", reinterpret_cast<long>(residuals));
+		//    //printf("signed %p\n", static_cast<void *>(parameters[i]));
+		//printf("jacobian %p\n", static_cast<void *>(jacobians));
+		//printf("residual %p\n", static_cast<void *>(residuals));
 		//}
 		int n = marginalization_info->n;
 		int m = marginalization_info->m;

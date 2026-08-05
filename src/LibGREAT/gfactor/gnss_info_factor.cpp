@@ -89,7 +89,7 @@ gfgo::GNSSInfo::~GNSSInfo()
 
 }
 
-void gfgo::GNSSInfo::addResidualBlockInfo(GNSSResidualBlockInfo * residual_block_info, const map<long, vector<int>> &para_ids)
+void gfgo::GNSSInfo::addResidualBlockInfo(GNSSResidualBlockInfo * residual_block_info, const map<ParameterBlockKey, vector<int>> &para_ids)
 {
 	factors.emplace_back(residual_block_info);
 	para_index.emplace_back(para_ids);
@@ -102,7 +102,7 @@ void gfgo::GNSSInfo::addResidualBlockInfo(GNSSResidualBlockInfo * residual_block
 	{
 		double *addr = parameter_blocks[i];
 		int size = parameter_block_sizes[i];
-		parameter_block_size[reinterpret_cast<long>(addr)] = size;
+		parameter_block_size[reinterpret_cast<ParameterBlockKey>(addr)] = size;
 	}
 }
 void gfgo::GNSSInfo::addResidualBlockInfo(GNSSResidualBlockInfo * residual_block_info)
@@ -120,14 +120,14 @@ void gfgo::GNSSInfo::addResidualBlockInfo(GNSSResidualBlockInfo * residual_block
 		
 		int size = parameter_block_sizes[i];
 		
-		parameter_block_size[reinterpret_cast<long>(addr)] = size;
+		parameter_block_size[reinterpret_cast<ParameterBlockKey>(addr)] = size;
 	}
 	
 	for (int i = 0; i < static_cast<int>(residual_block_info->drop_set.size()); i++)
 	{
 		
 		double *addr = parameter_blocks[residual_block_info->drop_set[i]];
-		parameter_block_idx[reinterpret_cast<long>(addr)] = 0;
+		parameter_block_idx[reinterpret_cast<ParameterBlockKey>(addr)] = 0;
 	}
 }
 
@@ -170,16 +170,16 @@ void gfgo::GNSSInfo::constructEqu(Eigen::MatrixXd variance)
 		for (int i = 0; i < static_cast<int>(it->parameter_blocks.size()); i++)
 		{
 			int j_col_count = 0; /// colunm index of jacobian matrix
-			//int size_i = parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[i])];			
-			int size_i = localSize(parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[i])]);
+			//int size_i = parameter_block_size[reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i])];
+			int size_i = localSize(parameter_block_size[reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i])]);
 			assert(size_i != 7);
 			Eigen::MatrixXd jacobian_i = it->jacobians[i].block(0, j_col_count, r_size, size_i);			
 			assert(r_size == jacobian_i.rows());
-			long str = reinterpret_cast<long>(it->parameter_blocks[i]);
+			ParameterBlockKey str = reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i]);
 			auto it_find = para_index[obs_count].find(str);
 			if (it_find != para_index[obs_count].end())
 			{
-				vector<int> jacobian_col_id = para_index[obs_count][reinterpret_cast<long>(it->parameter_blocks[i])];
+				vector<int> jacobian_col_id = para_index[obs_count][reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i])];
 				J.block(j_row_count, jacobian_col_id[0], r_size, size_i) += -jacobian_i;
 				j_col_count = j_col_count + size_i;
 			}
@@ -250,15 +250,15 @@ void gfgo::GNSSInfo::constructEqu(Eigen::MatrixXd variance, int var_type)
 		for (int i = 0; i < static_cast<int>(it->parameter_blocks.size()); i++)
 		{
 			int j_col_count = 0; /// colunm index of jacobian matrix
-			int size_i = localSize(parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[i])]);
+			int size_i = localSize(parameter_block_size[reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i])]);
 			assert(size_i != 7);
 			Eigen::MatrixXd jacobian_i = it->jacobians[i].block(0, j_col_count, r_size, size_i);
 			assert(r_size == jacobian_i.rows());
-			long str = reinterpret_cast<long>(it->parameter_blocks[i]);
+			ParameterBlockKey str = reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i]);
 			auto it_find = para_index[obs_count].find(str);
 			if (it_find != para_index[obs_count].end())
 			{
-				vector<int> jacobian_col_id = para_index[obs_count][reinterpret_cast<long>(it->parameter_blocks[i])];
+				vector<int> jacobian_col_id = para_index[obs_count][reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i])];
 				J.block(j_row_count, jacobian_col_id[0], r_size, size_i) += -jacobian_i;
 				j_col_count = j_col_count + size_i;
 			}
@@ -333,10 +333,10 @@ void gfgo::GNSSInfo::constructEqu_fromCeres(Eigen::MatrixXd variance)
 	// 	for (int i = 0; i < static_cast<int>(it->parameter_blocks.size()); i++)
 	// 	{
 	// 		int j_col_count = 0; /// colunm index of jacobian matrix
-	// 		int size_i = parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[i])];
+	// 		int size_i = parameter_block_size[reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i])];
 	// 		Eigen::MatrixXd jacobian_i = it->jacobians[i].block(0, j_col_count, r_size, size_i);
 	// 		assert(r_size == jacobian_i.rows());
-	// 		vector<int> jacobian_col_id = para_index[obs_count][reinterpret_cast<long>(it->parameter_blocks[i])];
+	// 		vector<int> jacobian_col_id = para_index[obs_count][reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i])];
 	// 		J.block(j_row_count, jacobian_col_id[0], r_size, size_i) += -jacobian_i;
 	// 		j_col_count = j_col_count + size_i;
 	// 	}
@@ -350,7 +350,7 @@ void gfgo::GNSSInfo::constructEqu_fromCeres(Eigen::MatrixXd variance)
 		int r_size = it->cost_function->num_residuals();
 		for (int i = 0; i < static_cast<int>(it->parameter_blocks.size()); i++)
 		{
-			long addr = reinterpret_cast<long>(it->parameter_blocks[i]);
+			ParameterBlockKey addr = reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i]);
 			int global_size_i = parameter_block_size[addr];
 			int local_size_i = localSize(global_size_i);
 
@@ -471,7 +471,7 @@ void gfgo::GNSSInfo::preMarginalize()
 		std::vector<int> block_sizes = it->cost_function->parameter_block_sizes();
 		for (int i = 0; i < static_cast<int>(block_sizes.size()); i++)
 		{
-			long addr = reinterpret_cast<long>(it->parameter_blocks[i]);
+			ParameterBlockKey addr = reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i]);
 			int size = block_sizes[i];
 			if (parameter_block_data.find(addr) == parameter_block_data.end())
 			{
@@ -525,13 +525,13 @@ void gfgo::GNSSInfo::marginalize()
 	{
 		for (int i = 0; i < static_cast<int>(it->parameter_blocks.size()); i++)
 		{
-			int idx_i = parameter_block_idx[reinterpret_cast<long>(it->parameter_blocks[i])];
-			int size_i = parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[i])];
+			int idx_i = parameter_block_idx[reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i])];
+			int size_i = parameter_block_size[reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[i])];
 			Eigen::MatrixXd jacobian_i = it->jacobians[i].leftCols(size_i);
 			for (int j = i; j < static_cast<int>(it->parameter_blocks.size()); j++)
 			{
-				int idx_j = parameter_block_idx[reinterpret_cast<long>(it->parameter_blocks[j])];
-				int size_j = parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[j])];
+				int idx_j = parameter_block_idx[reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[j])];
+				int size_j = parameter_block_size[reinterpret_cast<ParameterBlockKey>(it->parameter_blocks[j])];
 				Eigen::MatrixXd jacobian_j = it->jacobians[j].leftCols(size_j);
 				if (i == j)
 					A.block(idx_i, idx_j, size_i, size_j) += jacobian_i.transpose() * jacobian_j;
@@ -578,7 +578,7 @@ void gfgo::GNSSInfo::marginalize()
 
 
 
-std::vector<double*> gfgo::GNSSInfo::getParameterBlocks(std::unordered_map<long, double*>& addr_shift)
+std::vector<double*> gfgo::GNSSInfo::getParameterBlocks(std::unordered_map<ParameterBlockKey, double*>& addr_shift)
 {
 
 	// Some data is retained in the Marg variable after the iteration. This data is used solely for adding prior residuals during the next optimization step and is not utilized for the subsequent Marg calculation.
@@ -591,18 +591,20 @@ std::vector<double*> gfgo::GNSSInfo::getParameterBlocks(std::unordered_map<long,
 	{
 		if (it.second >= m)
 		{
-				/* auto it_find = addr_shift.find(it.first);
-			if (it_find != addr_shift.end())
+			const auto shifted = addr_shift.find(it.first);
+			if (shifted == addr_shift.end() || shifted->second == nullptr)
 			{
-				
-			}	*/		
+				valid = false;
+				keep_block_size.clear();
+				keep_block_idx.clear();
+				keep_block_data.clear();
+				keep_block_addr.clear();
+				return keep_block_addr;
+			}
 			keep_block_size.push_back(parameter_block_size[it.first]);
-			
 			keep_block_idx.push_back(parameter_block_idx[it.first]);
-		
 			keep_block_data.push_back(parameter_block_data[it.first]);
-			keep_block_addr.push_back(addr_shift[it.first]);
-			
+			keep_block_addr.push_back(shifted->second);
 		}
 	}
 	// The total size of all parameters in the variable block, the sum of all fuzziness values, i.e., the number of fuzziness values.
@@ -629,9 +631,9 @@ bool gfgo::MarginalizationGNSSFactor::Evaluate(double const * const * parameters
 			//for (int i = 0; i < static_cast<int>(keep_block_size.size()); i++)
 			//{
 			//    //printf("unsigned %x\n", reinterpret_cast<unsigned long>(parameters[i]));
-			//    //printf("signed %x\n", reinterpret_cast<long>(parameters[i]));
-			//printf("jacobian %x\n", reinterpret_cast<long>(jacobians));
-			//printf("residual %x\n", reinterpret_cast<long>(residuals));
+			//    //printf("signed %p\n", static_cast<void *>(parameters[i]));
+			//printf("jacobian %p\n", static_cast<void *>(jacobians));
+			//printf("residual %p\n", static_cast<void *>(residuals));
 			//}
 	int n = gnss_info->n;
 	int m = gnss_info->m;

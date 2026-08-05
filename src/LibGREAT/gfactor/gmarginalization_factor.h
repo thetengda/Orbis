@@ -13,6 +13,7 @@
 
 #include"gfgo/gutility.h"
 #include "gexport/ExportLibGREAT.h"
+#include <cstdint>
 
 namespace gfgo
 {
@@ -58,8 +59,8 @@ namespace gfgo
 		std::vector<ResidualBlockInfo *> sub_factors;
 		Eigen::MatrixXd A;
 		Eigen::VectorXd b;
-		std::map<long, int> parameter_block_size;		/// global size
-		std::map<long, int> parameter_block_idx;		/// local size
+		std::map<std::uintptr_t, int> parameter_block_size;		/// global size
+		std::map<std::uintptr_t, int> parameter_block_idx;		/// local size
 	};
 
 	/**
@@ -102,14 +103,14 @@ namespace gfgo
 		 *
 		 * Extracts parameter blocks to be kept (not marginalized) and updates their addresses using the provided shift mapping. Prepares data structures for prior factor construction.
 		 */
-		std::vector<double *> getParameterBlocks(std::map<long, double *> &addr_shift);
+		std::vector<double *> getParameterBlocks(std::map<std::uintptr_t, double *> &addr_shift);
 
 		std::vector<ResidualBlockInfo *> factors;
 		int m=0, n=0;
-		std::map<long, int> parameter_block_size;		/// global size
+		std::map<std::uintptr_t, int> parameter_block_size;		/// global size
 		int sum_block_size=0;
-		std::map<long, int> parameter_block_idx;		/// local size
-		std::map<long, double *> parameter_block_data;
+		std::map<std::uintptr_t, int> parameter_block_idx;		/// local size
+		std::map<std::uintptr_t, double *> parameter_block_data;
 
 		std::vector<int> keep_block_size;						/// global size
 		std::vector<int> keep_block_idx;						/// local size

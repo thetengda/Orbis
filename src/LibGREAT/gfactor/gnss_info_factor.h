@@ -13,9 +13,12 @@
 
 #include"gfgo/gutility.h"
 #include "gexport/ExportLibGREAT.h"
+#include <cstdint>
 
 namespace gfgo
 {
+	using ParameterBlockKey = std::uintptr_t;
+
 	/**
 		*@brief class for construting residual blocks (for single observation equation)
 		*/
@@ -54,7 +57,7 @@ namespace gfgo
 		 *
 		 * Stores GNSS factors and parameter indexing for covariance computation.
 		 */
-		void addResidualBlockInfo(GNSSResidualBlockInfo *residual_block_info, const map<long, vector<int>> &para_ids);	
+		void addResidualBlockInfo(GNSSResidualBlockInfo *residual_block_info, const map<ParameterBlockKey, vector<int>> &para_ids);
 		
 		/**
 		 * @brief Add GNSS residual block for marginalization
@@ -97,7 +100,7 @@ namespace gfgo
 		void preMarginalize();
 		
 		
-		std::vector<long> ordered_addrs;   // 记录参数块顺序
+		std::vector<ParameterBlockKey> ordered_addrs;   // 记录参数块顺序
 		
 		/**
 		 * @brief Perform Schur complement marginalization for GNSS factors
@@ -116,25 +119,25 @@ namespace gfgo
 		 * Extracts GNSS parameter blocks to be kept (not marginalized) and updates their addresses using the provided shift mapping.
 		 * Prepares data structures for GNSS prior factor construction in subsequent optimization.
 		 */
-		std::vector<double *> getParameterBlocks(std::unordered_map<long, double *> &addr_shift);		
+		std::vector<double *> getParameterBlocks(std::unordered_map<ParameterBlockKey, double *> &addr_shift);
 		/// manager the  factors 
 		/// Combine all factor's jacobians and residuals into a large matrix
 		std::vector<GNSSResidualBlockInfo *> factors;
 		//t_gamb_manager* amb_manager = nullptr;  // 指向外部模糊度管理器
 		int m = 0, n = 0;			
-		//std::unordered_map<long, int> parameter_block_size;   /// Store all parameter addresses and sizes	总的变量块
+		//std::unordered_map<ParameterBlockKey, int> parameter_block_size;   /// Store all parameter addresses and sizes	总的变量块
 		int sum_block_size = 0;
-		//std::unordered_map<long, int> parameter_block_idx;    /// parameter index in Jacobians要被丢弃的变量块
-		//std::unordered_map<long, double *> parameter_block_data;
-		std::map<long, int> parameter_block_size;
-		std::map<long, int> parameter_block_idx;
-		std::map<long, double*> parameter_block_data;
+		//std::unordered_map<ParameterBlockKey, int> parameter_block_idx;    /// parameter index in Jacobians要被丢弃的变量块
+		//std::unordered_map<ParameterBlockKey, double *> parameter_block_data;
+		std::map<ParameterBlockKey, int> parameter_block_size;
+		std::map<ParameterBlockKey, int> parameter_block_idx;
+		std::map<ParameterBlockKey, double*> parameter_block_data;
 		std::vector<int> keep_block_size;						/// global size
 		std::vector<int> keep_block_idx;						/// local size
 		std::vector<double *> keep_block_data;
 		int n_size = 0;
 		int para_size = 0;
-		std::vector<std::map<long, std::vector<int>>> para_index;       ///for reconstruct jacobian
+		std::vector<std::map<ParameterBlockKey, std::vector<int>>> para_index;       ///for reconstruct jacobian
 
 		// add for debug hwzhang
 		Eigen::VectorXd postfit_qv_diag;

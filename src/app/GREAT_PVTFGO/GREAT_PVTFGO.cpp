@@ -11,6 +11,7 @@
 
 #include "gcfg_fgopvt.h"
 #include <chrono>
+#include <sstream>
 #include <thread>
 
 using namespace std;
@@ -166,7 +167,7 @@ int main(int argc, char** argv)
 		}
 		// add for PPP
 		else if (ifmt == IFMT::BIASINEX_INP) { gdata = gbia; tgcoder = new t_biasinex(&gset, "", 20480); }
-		else if (ifmt == IFMT::BIAS_INP) { gdata = gbia; tgcoder = new t_biasinex(&gset, "", 20480); }
+		else if (ifmt == IFMT::BIAS_INP) { gdata = gbia; tgcoder = new t_biabernese(&gset, "", 20480); }
 		// dont know is or not
 		//else if (ifmt == IFMT::LEAPSECOND_INP) { gdata = gleap; tgcoder = new t_leapsecond(&gset, "", 4096); }
 		else if (ifmt == DE_INP) { gdata = gde; tgcoder = new t_dvpteph405(&gset, "", 4096); }
@@ -218,6 +219,19 @@ int main(int argc, char** argv)
 			delete tgcoder;
 
 		}
+	}
+	if (gbia && my_logger)
+	{
+		const vector<string> bias_ac = gbia->get_ac();
+		ostringstream ac_list;
+		for (size_t i = 0; i < bias_ac.size(); ++i)
+		{
+			if (i > 0) ac_list << ",";
+			ac_list << (bias_ac[i].empty() ? "<empty>" : bias_ac[i]);
+		}
+		SPDLOG_LOGGER_INFO(my_logger,
+			"Loaded bias products: {} analysis center(s) [{}], phase OSB={}",
+			bias_ac.size(), ac_list.str(), gbia->has_phase_osb());
 	}
 	// set antennas for satllites (must be before PCV assigning)
 	t_gtime beg = dynamic_cast<t_gsetgen*>(&gset)->beg();

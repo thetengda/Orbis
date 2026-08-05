@@ -91,4 +91,53 @@
 - 固定统计：GODN 条件固定 56/238（23.5%），首次固定 SOW 259260，共 10 段、最长连续 32 个历元，固定 ratio 范围 2.06--50.58；HARB 条件固定 87/238（36.6%），首次固定 SOW 259410，共 24 段、最长连续 18 个历元，固定 ratio 范围 2.03--32.46。
 - 定位统计：以既有同日五频滤波末值作稳定参考，GODN 条件固定历元三维误差均值/RMS/最大值为 0.0804/0.1379/0.5903 m，HARB 为 0.0485/0.0839/0.4517 m；大值集中于初始化阶段。去除前 30 分钟后，不分固定状态的三维误差均值/RMS/最大值分别为 GODN 0.0312/0.0354/0.1188 m、HARB 0.0326/0.0389/0.0947 m。条件固定相对同历元 FGO 浮点坐标的三维改变量均值/最大值分别为 GODN 0.0600/0.5857 m、HARB 0.0377/0.4070 m。
 - 日志诊断：主日志、stdout、stderr 中 Ceres/协方差失败、NaN/Inf、异常退出、求解失败和可用卫星不足等关键模式合计命中 0；移除的硬编码文件输出未再产生，无条件 ratio stdout 行为也已消失。
-- 结论：五频 RAW 固定搜索与条件固定流程通过两站两小时验收；早期条件固定质量受尚未收敛的图状态影响，留待“固定反馈到因子图”和滤波基线比较阶段通过持久化固定信息评估和改进。
+- 当时结论：五频 RAW 的 NL 搜索与条件固定主流程可执行；后续用正确 Bias-SINEX 解码重跑时发现 EWL24/EWL25 协方差和整数回写分支缺失，因此本节数值仅保留为修正前基线，最终五频固定验收以后续回归为准。
+
+### OSB 阶段：Bias-SINEX 解码入口修正
+
+- 输入提交：`298ac7e fix(ambiguity): stabilize five-frequency RAW fixing`。
+- 配置：新增 `sample_data/PPPFLT_2023305_OSB/xml/GREAT_PPPFGO_kinematic_FF_Fixed_2h.xml`，使用 WUM 快速轨道、钟差和 `WUM0MGXRAP_20233050000_01D_01D_OSB.BIA`，五频 `RAW_ALL`、`fix_mode=SEARCH`、`upd_mode=OSB`，不配置 UPD 或 IFCB。
+- 无效命令记录：首次冒烟命令遗漏 `-x`，程序在 0.181 s 内由参数解析返回 1，未开始数据读取；更正命令后才计入流程诊断。
+- 修正前 GODN 10 分钟：正确命令退出码 0，但 19 个候选历元全部报告 `combine PPP observations wrong`，FGO/FLT 都是 0 行。新增载入摘要后确认 `Loaded bias products: 0 analysis center(s) [], phase OSB=false`，说明不是观测缺失，而是 Bias-SINEX 没有进入偏差容器。
+- 根因：`GREAT_PVTFGO` 对通用 `<bias>` 输入错误地实例化 `t_biasinex`；同仓库滤波程序 `GREAT_PVT` 对该输入使用支持 WUM/CAS 等 Bias-SINEX OSB 记录的 `t_biabernese`。现已把 FGO 入口与滤波入口对齐；`<biasinex>` 的原有 `t_biasinex` 分支保持不变。另增加一条 INFO 摘要，报告实际载入的分析中心及是否包含绝对相位 OSB，便于防止“退出码 0、结果 0 行”的静默退化。
+- 修正后 GODN 10 分钟：退出码 0、墙钟 71.131 s；载入 1 个分析中心 `[WHU_A]` 且 `phase OSB=true`；FGO 19/19、FLT 18/18 个历元，FLT 中 Fixed 15、Float 3；缺 OSB 信号跳过警告 0，关键错误 0。
+- 解码修正后的首轮两小时运行（在后续 Win64 地址键和 EWL24/EWL25 修正之前）：GODN、HARB 分站并行，两个进程退出码均为 0；总墙钟 870.967 s，程序内处理耗时分别为 846.608 s 和 860.841 s。可执行文件 SHA-256 为 `2A47E7D6027549DA47A15A306D5025EE9139FA7B7B28B9B0E75DF844CA1C6877`。
+- 输出完整性：两站 FGO 各 239 个历元（SOW 259230--266370），FLT 各 238 个历元（SOW 259260--266370）；相邻间隔均为 30 s，坐标无 NaN/Inf。两站日志均且仅有 1 条 `[WHU_A], phase OSB=true` 载入摘要，`OSB mode skipped` 为 0。
+- 固定统计：GODN 条件固定 235/238（98.7%），首次固定 SOW 259290，固定 ratio 范围 1.51--18.51；3 个 Float 均在前 3 分钟。HARB 条件固定 232/238（97.5%），首次固定 SOW 259260，固定 ratio 范围 1.50--81.07；6 个 Float 分布在 SOW 260310--260340、262680--262710 和 265650--265680 的短弧段。
+- 定位统计：以既有两小时 OSB 滤波末值作稳定参考，去除前 30 分钟后 GODN 条件解三维均值/RMS/最大值为 0.0159/0.0191/0.0540 m，HARB 为 0.0124/0.0145/0.0405 m；相对既有同历元 OSB 滤波结果的后 90 分钟三维 RMS 分别为 0.0206 m 和 0.0133 m。全段差值 RMS 受初始化影响，分别为 0.0856 m 和 0.0481 m；HARB 前两历元虽通过低 ratio 固定但误差约 0.53--0.59 m，阶段 4 反馈测试需重点检查错误固定的传播风险。
+- 日志诊断：主日志、stdout、stderr 中 Ceres/协方差失败、NaN/Inf、异常退出、求解失败、可用卫星不足和观测组合失败等关键模式合计命中 0。
+- 首轮结论：五频 RAW OSB 读取、逐信号改正和筛选已得到验证；该轮固定结果随后被 EWL24/EWL25 缺失分支的诊断取代，不作为最终固定验收。修复恢复了 FGO 对通用 Bias-SINEX `<bias>` 输入的既有语义，`<biasinex>` 分支保持不变。
+
+### 五频 EWL24/EWL25 与 Win64 参数地址键修正
+
+- 正确的 CAS Bias-SINEX 解码使 UPD 算例实际载入 DCB 后，完整运行曾非确定性触发 Ceres `Map key not found`。根因是 Windows LLP64 上 `long` 为 32 位，而 GNSS 后验和边缘化代码把 64 位参数指针转换为 `long` 作为 map key，地址高位被截断并可能碰撞；短段是否触发取决于进程内存布局。
+- 首轮只修改容器类型后，仍有一个局部 `const long address` 使后验描述符查找全部失败；该次进程虽然退出 0，但所有历元均被拒绝，明确作废。补齐局部变量后，2 分钟诊断恢复有效 posterior、协方差以及 FGO/FLT 输出。
+- 修正范围随后扩展到 `GNSSInfo`、`MarginalizationInfo` 及其 PVT/GINS 调用链，地址键统一为 `std::uintptr_t`。XML、CLI 和结果文件格式未变；但导出 C++ 类的方法签名及 public/protected 容器类型发生 ABI/源码接口变化，必须同步重编 `LibGREAT` 与所有消费者，不能与旧二进制混用。
+- 地址键修正后的 UPD 两站 2 小时兼容回归（尚未包含下述 EWL 修正）：GODN/HARB 均退出 0，FGO 各 239 行、FLT 各 238 行且 30 s 连续，无 NaN/Inf、Ceres/地址键/后验描述符失败。GODN 固定 217/238、首次固定 SOW 259470；HARB 固定 222/238、首次固定 SOW 259350。去除前 30 分钟后，FLT 相对同历元滤波基线的三维 RMS 分别为 0.0157 m 和 0.0186 m。
+- 该回归的详细日志每个处理历元都出现 `_prepareCovarianceWL ... prepare Double-Difference covariance is Wrong`：GODN 420 条、HARB 442 条。审计确认这不是可忽略的协方差偶发错误，而是 `_prepareCovarianceWL()` 只实现 WL/EWL，EWL24/EWL25 进入时波长保持 0、值向量为空；上层又忽略中间组合返回值，所以进程仍可完成，但 L4/L5 的 LAMBDA、整数保存和宽巷约束实际缺失。
+- 修正为四种宽巷组合的统一显式映射：WL=`L1-L2`、EWL=`L2-L3`、EWL24=`L2-L4`、EWL25=`L2-L5`；补齐 EWL24/EWL25 的协方差、部分固定标志清理和整数回写，并在未知模式、端点不足、无效模糊度、缺波长、非正/非有限波长、非有限协方差及维数不一致时安全返回且输出准确诊断。现有 `_addFixConstraintWL()` 已能把两种组合继续写入滤波虚拟观测。
+- 第一轮 EWL 修正的 GODN 10 分钟门禁：UPD/OSB 并行，退出码均为 0，程序内耗时 94.750 s/63.628 s；两者 FGO 19 行、FLT 18 行，分别固定 12/18 与 17/18。旧协方差错误、`_selectAmb Wrong`、未知组合、非正波长、维数不一致、地址键和 Ceres failure 均为 0。
+- 随后启动的 UPD/OSB × GODN/HARB 两小时并行对照均退出 0、总墙钟 1,350.479 s，但代码复核发现既有 WL/EWL 协方差只在两条 DD 的首颗卫星 PRN 数字相同时填非对角元：它会漏掉共享第二端点/参考星的相关性、误把跨系统同号卫星关联，并对 GLONASS FDMA 复用第一条 DD 的波长。该轮因此只作为“EWL24/EWL25 已执行、相关性模型尚未修正”的中间诊断，不计入最终验收。
+- 协方差最终修正：按每条 DD 的 `[satA@band1, satB@band1, satA@band2, satB@band2]` 四个真实参数构造 `[+1/lambda_A1, -1/lambda_B1, -1/lambda_A2, +1/lambda_B2]`，逐条计算全部上三角 `c_i^T Qx c_j`；GLONASS 按卫星取 FDMA 波长，其他系统按系统取波长，不再按 PRN 猜测相关性。`Qx` 为单位权协因数，最后统一乘 `sigma0^2`；同时要求 `sigma0>0`，校验四端点索引/波长/协方差有限性，并显式拒绝未实现的 GLONASS 非 WL 约束，避免零除。
+- 参数 shift 安全性补强：两个 `getParameterBlocks()` 不再用 `operator[]` 为缺失 shift 静默插入空指针，而是把 prior 标为无效并安全返回；IF-PPP 的旧先验 ISB0 在星座刚丢失时也无条件进入 drop set。RAW 路径原有 retained-block fallback 保持不变。
+- WL/EWL 完整协方差与地址键修正后的构建：`cmake --build build --config Release --target GREAT_PVTFGO -j 4` 与同参数 `GREAT_GINSFGO` 均通过，确认 PVT 与 GINS 两个主要消费者可针对新的边缘化 API 完整链接。
+- 完整协方差版 GODN 10 分钟门禁：UPD/OSB 并行，退出码均为 0，程序内耗时 95.142 s/63.737 s；两者 FGO 19 行、FLT 18 行，分别固定 12/18 与 18/18。末历元分别为 `(1130760.6830, -4831298.6350, 3994155.1548) m` 和 `(1130760.6991, -4831298.6994, 3994155.2197) m`。EWL/波长/索引/协方差/`sigma0`/维数、未知组合、地址键和 Ceres failure 均为 0；测试后两份 XML 的结束时间均恢复为 `01:59:30`。
+- 随后一次拟作为最终验收的四组两小时运行，在 585.228 s 时由静态复核发现 NL 协方差阻断问题后主动停止；四个子进程退出码均为 -1，截断结果全部作废。问题是 `_prepareCovariance()` 对 GLONASS 两端仍使用同一 `factor`，与浮点 NL 值和最终约束所用的逐星波长不一致，且 NL 未像 WL/EWL 一样乘 `sigma0^2`。
+- NL 最终修正：每条 DD 按两个真实端点构造 `[+1/lambda_A, -1/lambda_B]`，RAW 按 `AMB_L1`--`AMB_L5` 选择波段、IF 使用 `NL`，GLONASS 逐星取波长、其他系统按系统取波长；计算全部上三角 `c_i^T Qx c_j * sigma0^2`，并加入候选端点、波长、参数索引、有限性和维数检查。UPD/OSB 产品误差继续遵循既有“确定性改正”策略；当前产品接口只保留最后一次查询的 sigma，未伪造不完整的跨 DD 产品协方差。
+- 同时把 `_selectAmb()` 的 `ndef==0` 从误导性 ERROR 改为 DEBUG“无独立候选”，仍返回 -1 并由上层按 Float 回退，数值语义不变。最终 `GREAT_PVTFGO`、`GREAT_GINSFGO` Release 重编均通过。
+- NL 完整协方差版四组 20 分钟门禁：UPD/OSB × GODN/HARB 全部退出 0、总墙钟 240.156 s；每组 FGO 39 行、FLT 38 行且连续。固定数为 UPD GODN 32/38、UPD HARB 25/38、OSB GODN 38/38、OSB HARB 32/38；末历元坐标分别为 `(1130760.6860, -4831298.6496, 3994155.1696)`、`(5084657.6094, 2670325.4740, -2768480.8424)`、`(1130760.6920, -4831298.6671, 3994155.1965)`、`(5084657.6075, 2670325.4800, -2768480.8448) m`。NL/WL/EWL、波长/索引/维数、地址键、未知组合和 Ceres failure 均为 0；门禁后 XML 恢复为两小时。
+- 可复现运行命令（分别在两个算例目录执行；`STATION` 取 `GODN` 或 `HARB`，并为并发进程指定不同 `LOG`）：`..\..\build_Windows\Bin\Release\GREAT_PVTFGO.exe -x .\xml\GREAT_PPPFGO_kinematic_FF_Fixed_2h.xml node:config:gen:rec=STATION attr:config:outputs:log:name=LOG`。UPD 算例目录为 `sample_data/PPPFLT_2023305`，OSB 为 `sample_data/PPPFLT_2023305_OSB`；20 分钟门禁只临时把 XML `<end>` 改为 `00:19:30`，运行后立即用补丁恢复。
+
+### NL/WL 完整协方差后的最终两小时回归
+
+- 最终配置均为 `00:00:00--01:59:30`，UPD/OSB × GODN/HARB 四个进程并行运行；全部退出码为 0，总墙钟 1,350.402 s。OSB 两站程序内处理耗时为 884/906 s；UPD 两站分别约在总墙钟 1,125/1,350 s 时结束。
+- 输出完整性：四组 FGO 均为 239 历元、SOW 259230--266370；FLT 均为 238 历元、SOW 259260--266370；全部相邻间隔严格为 30 s。所有坐标和 ratio 均为有限数，原文 NaN/Inf 扫描为 0。固定结果在本阶段仍只写入 FLT，因此四组 FGO 的 239 个历元均标记为 Float。
+- UPD 固定统计：GODN 为 Fixed 219/238（92.02%）、首次固定 SOW 259260，Fixed ratio 的 min/median/mean/p95/max 为 2.01/6.80/8.9414/21.50/58.00；HARB 为 Fixed 218/238（91.60%）、首次固定 SOW 259320，ratio 为 2.00/4.455/5.3961/11.1005/25.23。
+- OSB 固定统计：GODN 为 Fixed 238/238（100%）、首次固定 SOW 259260，ratio 的 min/median/mean/max 为 1.74/7.275/8.0158/28.74；HARB 为 Fixed 228/238（95.80%）、首次固定 SOW 259260，Fixed ratio 为 1.58/19.565/22.3166/80.01。HARB 的 10 个 Float 历元为 SOW 259830、260040、260070、260100、260310、260340、262680、262710、265650、265680。
+- 与同历元滤波条件解比较：按 XML 名义起点去除前 30 分钟（SOW >= 261000，180 历元），FGO 与 FLT 的三维 ECEF 差 RMS/均值/最大值分别为 UPD GODN 0.02358/0.02018/0.04485 m、UPD HARB 0.03412/0.03159/0.06415 m、OSB GODN 0.02038/0.01883/0.03972 m、OSB HARB 0.03205/0.02606/0.08478 m。全段 RMS 因初始化及条件固定改变量分别为 0.06606、0.04417、0.12561、0.19134 m。
+- 以“从该历元到结束一直不超过阈值”为口径，FGO/FLT 三维差永久进入 0.1/0.05 m 的 SOW 分别为：UPD GODN 259440/259950，UPD HARB 259830/263850，OSB GODN 259890/260190，OSB HARB 260580/261570。该指标衡量因子图浮点解和滤波条件解的一致性，不等同于相对外部真值的定位收敛时间。
+- 末历元 FGO/FLT 坐标：UPD GODN 为 `(1130760.6928,-4831298.6698,3994155.1898)` / `(1130760.6953,-4831298.6713,3994155.1980)` m，UPD HARB 为 `(5084657.6104,2670325.4782,-2768480.8330)` / `(5084657.5964,2670325.4731,-2768480.8274)` m；OSB GODN 为 `(1130760.7058,-4831298.6625,3994155.1943)` / `(1130760.6894,-4831298.6613,3994155.1933)` m，OSB HARB 为 `(5084657.6022,2670325.4684,-2768480.8285)` / `(5084657.6146,2670325.4809,-2768480.8414)` m。
+- 产品载入摘要：UPD 两站均且仅有 1 条 `1 analysis center(s) [CAS_R], phase OSB=false`；OSB 两站均且仅有 1 条 `1 analysis center(s) [WHU_A], phase OSB=true`。OSB 保留可改正信号并逐历元跳过缺 OSB 信号：GODN 共 7,017 条（每历元 20--36），HARB 共 5,367 条（每历元 21--24）；输出仍保持连续且固定率如上。
+- 硬错误扫描：NL/WL/EWL 协方差、未知组合、非正波长、参数索引、非有限协方差、`sigma0`、维数、`Map key not found`、`_selectAmb Wrong`、Ceres failure、观测组合失败均为 0。既有非致命噪声包括每组 239 条空的 `t_gpvtfgo` ERROR 级标记，以及 ATX 对未使用频率码和输入路径跳过的初始化消息；不计为求解失败。
+- 最终构建复核：沙箱内首次增量构建仅因 MSBuild `FileTracker` 权限返回 `E_ACCESSDENIED`，按相同命令在允许环境重跑后，`GREAT_PVTFGO` 与 `GREAT_GINSFGO` Release 均成功。SHA-256：`GREAT_PVTFGO.exe=2751E8DF3C8E0E80A74883AD847748A41EA5F8D80ADBECA907F8F873C7194B43`，`LibGREAT.dll=714620EA84BE7BCD039902CF69AC4AF326B25B4F9236F484CF73CBD3C1316C66`，`GREAT_GINSFGO.exe=A9184116BA9A2A7ADF2A79CCE4D3598A90E8223C112859DA89FCC3C4D67C2F71`。
+- 结论：五频 RAW 的 UPD 与 OSB 固定流程在最终 NL/WL 完整协方差实现上均通过双站两小时验收；Win64 参数地址不再截断，Bias-SINEX 入口正确，OSB 缺失信号按设计局部跳过。下一阶段以这些结果作为 `NONE` 基线，实现参数反馈和可边缘化固定约束反馈。
