@@ -309,61 +309,6 @@ namespace great
         {
             _amb_fixed = true;
             _fixed_amb_num = fixed_amb.size();
-
-			static ofstream fout("D:\\GREAT-FGO\\amb_WL_NL_debug.txt", ios::app);
-
-			fout << "============================================================\n";
-			fout << "epoch = " << t.str_ymdhms()
-				<< " mode = " << mode
-				<< " ratio = " << amb_cmn.get_ratio()
-				<< " boot = " << amb_cmn.get_boot()
-				<< " fixed_num = " << fixed_amb.size()
-				<< "\n";
-
-			int k = 0;
-			for (auto it_dd = _DD.begin(); it_dd != _DD.end(); ++it_dd)
-			{
-				string sat1 = "";
-				string sat2 = "";
-
-				if (it_dd->ddSats.size() >= 2)
-				{
-					sat1 = get<0>(it_dd->ddSats[0]);
-					sat2 = get<0>(it_dd->ddSats[1]);
-				}
-
-				bool sat1_is_ref = (_sat_refs.find(sat1) != _sat_refs.end());
-				bool sat2_is_ref = (_sat_refs.find(sat2) != _sat_refs.end());
-
-				fout << "k = " << k
-					<< " site = " << it_dd->site
-					<< " sat1 = " << sat1
-					<< " sat2 = " << sat2
-					<< " sat1_is_ref = " << sat1_is_ref
-					<< " sat2_is_ref = " << sat2_is_ref;
-
-				if (mode == "WL")
-				{
-					fout << " WL_integer = " << it_dd->iwl;
-				}
-				else if (mode == "NL")
-				{
-					if (k < fixed_amb.size())
-						fout << " NL_integer = " << fixed_amb[k];
-					else
-						fout << " NL_integer = NA";
-
-					fout << " WL_integer_used = " << it_dd->iwl;
-				}
-
-				fout << "\n";
-				k++;
-			}
-
-			fout << "\n";
-
-
-
             _DD_previous[mode] = _DD;
             for (auto it_dd = _DD.begin(); it_dd != _DD.end(); it_dd++)
             {
@@ -380,8 +325,9 @@ namespace great
             _fixed_amb_num = 0;
         }
         _outRatio = amb_cmn.get_ratio(); 
-        cout << _ratio << endl;
-        cout << _outRatio << endl;
+        if (_spdlog)
+            _spdlog->debug("Ambiguity resolution {}: accepted={} ratio={:.3f} fixed={}",
+                           mode, _amb_fixed, _outRatio, _fixed_amb_num);
         auto tmp_param = gflt->param();
         auto tmp_dx = gflt->dx();
 
@@ -2098,10 +2044,16 @@ namespace great
     bool t_gambiguity::_addFixConstraint(t_gflt *gflt)
     {
         //////========================= Virtual observation equation ===========================================
-        double dl = 0, flt= 0, integer= 0, Ba = 1, Bb = -1;
+        double dl = 0, flt = 0, integer = 0;
         double p0 = 1E9;
         for (auto itdd = _DD.begin(); itdd != _DD.end(); itdd++)
         {
+            // GLONASS uses satellite-dependent wavelength coefficients.
+            // Reset the generic double-difference coefficients for every
+            // equation so a preceding GLONASS constraint cannot leak into a
+            // different constellation or frequency.
+            double Ba = 1.0;
+            double Bb = -1.0;
             bool wl_fix = ((_obstype == gnut::OBSCOMBIN::RAW_MIX && itdd->isSngleFreq != true) || _obstype != gnut::OBSCOMBIN::RAW_MIX);
             if ((!itdd->isWlFixed && wl_fix) || !itdd->isNlFixed)
                 continue;
