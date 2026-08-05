@@ -29,6 +29,11 @@ namespace gfgo
         string sat_id;
         string amb_id;
         string ion_id;
+        // Observation-domain correction which is not part of the generic
+        // precise-bias equation (for example the GPS L5 IFCB correction).
+        // Store the value in the message so optimization, posterior testing
+        // and marginalization always linearize the identical observation.
+        double additive_correction = 0.0;
         int sat_global_id = -1;
         int amb_index = -1;
     };

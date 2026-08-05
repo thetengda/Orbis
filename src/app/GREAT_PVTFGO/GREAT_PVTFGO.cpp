@@ -242,7 +242,7 @@ int main(int argc, char** argv)
 
 	int frequency = dynamic_cast<t_gsetproc*>(&gset)->frequency();
 	set<string> system = dynamic_cast<t_gsetgen*>(&gset)->sys();
-	if (frequency == 3 && system.find("GPS") != system.end() && !isBase)
+	if (frequency >= 3 && system.find("GPS") != system.end() && !isBase && gifcb)
 	{
 		data->Add_Data("gifcb", gifcb);
 	}

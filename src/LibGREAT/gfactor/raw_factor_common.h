@@ -152,7 +152,7 @@ namespace raw_factor_detail
             }
         }
 
-        out.residual = equation.l.front();
+        out.residual = equation.l.front() + message.additive_correction;
         if (use_amb)
         {
             out.residual -= amb;

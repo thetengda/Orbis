@@ -1520,6 +1520,10 @@ int gfgomsf::t_gpvtfgo::_combine_RAW()
 	_crt_ele.clear();
 	_crt_SNR.clear();
     const bool require_osb = (_upd_mode == UPD_MODE::OSB);
+	t_gsetproc *proc_settings = dynamic_cast<t_gsetproc *>(_set);
+	const bool correct_gps_ifcb =
+		proc_settings && proc_settings->ifcb_model() == IFCB_MODEL::COR &&
+		_frequency >= 3 && (_gallbias == nullptr || !_gallbias->has_phase_osb());
 	int skipped_osb_observations = 0;
 
     for (auto &sat_data : _data)
@@ -1588,6 +1592,9 @@ int gfgomsf::t_gpvtfgo::_combine_RAW()
                 message.ion_id = t_gambRAW_manager::ionosphereKey(message.sat_id, _rover_count);
                 if (type == TYPE_L)
                 {
+					if (correct_gps_ifcb && system == GSYS::GPS && freq == FREQ_3)
+						message.additive_correction =
+							_gbias_model->ifcbDelay(sat_data, nullptr, OBSCOMBIN::RAW_ALL);
                     message.amb_index = _ambRAW_manager->getAmbSearchIndex(make_pair(sat_global_id, freq));
                     if (message.amb_index < 0)
                         return;
