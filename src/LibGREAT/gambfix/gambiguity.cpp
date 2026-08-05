@@ -13,10 +13,76 @@
 #include "gutils/gobs.h"
 #include "gmodels/gpar.h"
 #include <gproc/gfltmatrix.h>
+#include <cmath>
 using namespace std;
 
 namespace great
 {
+    namespace
+    {
+        enum class t_ambiguity_combination
+        {
+            NL,
+            WL,
+            EWL,
+            EWL24,
+            EWL25,
+            UNKNOWN
+        };
+
+        struct t_wide_lane_definition
+        {
+            t_wide_lane_definition()
+                : first_band(nullptr), second_band(nullptr), float_value(nullptr), integer_value(nullptr) {}
+
+            t_wide_lane_definition(const char *first, const char *second,
+                                   double t_dd_ambiguity::*float_member,
+                                   int t_dd_ambiguity::*integer_member)
+                : first_band(first), second_band(second), float_value(float_member), integer_value(integer_member) {}
+
+            const char *first_band;
+            const char *second_band;
+            double t_dd_ambiguity::*float_value;
+            int t_dd_ambiguity::*integer_value;
+        };
+
+        t_ambiguity_combination ambiguity_combination(const string &mode)
+        {
+            if (mode == "NL")
+                return t_ambiguity_combination::NL;
+            if (mode == "WL")
+                return t_ambiguity_combination::WL;
+            if (mode == "EWL")
+                return t_ambiguity_combination::EWL;
+            if (mode == "EWL24")
+                return t_ambiguity_combination::EWL24;
+            if (mode == "EWL25")
+                return t_ambiguity_combination::EWL25;
+            return t_ambiguity_combination::UNKNOWN;
+        }
+
+        bool wide_lane_definition(t_ambiguity_combination combination, t_wide_lane_definition &definition)
+        {
+            switch (combination)
+            {
+            case t_ambiguity_combination::WL:
+                definition = t_wide_lane_definition("L1", "L2", &t_dd_ambiguity::rwl, &t_dd_ambiguity::iwl);
+                return true;
+            case t_ambiguity_combination::EWL:
+                definition = t_wide_lane_definition("L2", "L3", &t_dd_ambiguity::rewl, &t_dd_ambiguity::iewl);
+                return true;
+            case t_ambiguity_combination::EWL24:
+                definition = t_wide_lane_definition("L2", "L4", &t_dd_ambiguity::rewl24, &t_dd_ambiguity::iewl24);
+                return true;
+            case t_ambiguity_combination::EWL25:
+                definition = t_wide_lane_definition("L2", "L5", &t_dd_ambiguity::rewl25, &t_dd_ambiguity::iewl25);
+                return true;
+            default:
+                return false;
+            }
+        }
+    }
+
     t_gambiguity::t_gambiguity()
     {
         _pdE = nullptr;
@@ -245,7 +311,7 @@ namespace great
         if (ndef < 0)
             return -1;
 
-        if (mode == "WL" || mode == "EWL")
+        if (mode == "WL" || mode == "EWL" || mode == "EWL24" || mode == "EWL25")
         {
             for (auto itdd = _DD.begin(); itdd != _DD.end();)
             {
@@ -1594,136 +1660,343 @@ namespace great
 
         if (ndef > 0 && ndef <= 999999)
             return ndef;
-        else
+
+        if (ndef == 0)
         {
             if (_spdlog)
-                SPDLOG_LOGGER_ERROR(_spdlog, "ERROR[t_gambiguity::_selectAmb] : _selectAmb Wrong");
+                SPDLOG_LOGGER_DEBUG(_spdlog,
+                                    "Warning[t_gambiguity::_selectAmb] : no independent ambiguity candidates remain");
             return -1;
         }
+
+        if (_spdlog)
+            SPDLOG_LOGGER_ERROR(_spdlog,
+                                "ERROR[t_gambiguity::_selectAmb] : invalid independent ambiguity count {}",
+                                ndef);
+        return -1;
     }
 
     bool t_gambiguity::_prepareCovariance(t_gamb_cmn *amb_cmn, SymmetricMatrix &covariance, vector<double> &value)
     {
-        int row = 0, col = 0;
-        // set covariance-matrix
-        covariance.resize(_DD.size());
-        covariance = 0;
-        for (auto itdd1 = _DD.begin(); itdd1 != _DD.end(); itdd1++)
-        {
-            // Row of covariance-matrix
-            value.push_back(itdd1->rnl);
-            row = distance(_DD.begin(), itdd1) + 1;
-
-            for (auto itdd2 = itdd1; itdd2 != _DD.end(); itdd2++)
-            {
-
-                // Column of covariance-matrix
-                col = distance(_DD.begin(), itdd2) + 1;
-
-                Matrix Q(2, 2);
-                // Covariance of ambiguity between four satellites
-                Q(1, 1) = amb_cmn->Qx()(get<1>(itdd1->ddSats[0]), get<1>(itdd2->ddSats[0]));
-                Q(1, 2) = amb_cmn->Qx()(get<1>(itdd1->ddSats[0]), get<1>(itdd2->ddSats[1]));
-                Q(2, 1) = amb_cmn->Qx()(get<1>(itdd1->ddSats[1]), get<1>(itdd2->ddSats[0]));
-                Q(2, 2) = amb_cmn->Qx()(get<1>(itdd1->ddSats[1]), get<1>(itdd2->ddSats[1]));
-
-                // Combinatorial transformation
-                covariance(row, col) = (Q(1, 1) - Q(2, 1) - Q(1, 2) + Q(2, 2)) / itdd1->factor / itdd2->factor; // unit [cycle]
-            }
-        }
-        // Unit weight
-
-        if (value.size() == 0 || covariance.size() == 0)
+        value.clear();
+        if (_DD.empty())
         {
             if (_spdlog)
-                SPDLOG_LOGGER_ERROR(_spdlog, "ERROR[t_gambiguity::_prepareCovariance] : prepare Double-Difference covariance is Wrong");
+                SPDLOG_LOGGER_DEBUG(_spdlog,
+                                    "Warning[t_gambiguity::_prepareCovariance] : no NL ambiguity candidates");
             return false;
         }
-        else
-            return true;
+
+        struct t_covariance_combination
+        {
+            int parameter_index[2];
+            double coefficient[2];
+        };
+
+        vector<t_covariance_combination> combinations;
+        combinations.reserve(_DD.size());
+        const SymmetricMatrix qx = amb_cmn->Qx();
+
+        for (const auto &dd : _DD)
+        {
+            if (dd.ddSats.size() != 2)
+            {
+                if (_spdlog)
+                    SPDLOG_LOGGER_ERROR(_spdlog,
+                                        "ERROR[t_gambiguity::_prepareCovariance] : NL candidate has {} ambiguity endpoints, expected 2",
+                                        dd.ddSats.size());
+                return false;
+            }
+
+            if (!std::isfinite(dd.rnl))
+            {
+                if (_spdlog)
+                    SPDLOG_LOGGER_ERROR(_spdlog,
+                                        "ERROR[t_gambiguity::_prepareCovariance] : NL candidate {}-{} has a non-finite float ambiguity",
+                                        get<0>(dd.ddSats[0]), get<0>(dd.ddSats[1]));
+                return false;
+            }
+
+            string band;
+            if (_obstype == OBSCOMBIN::IONO_FREE)
+            {
+                band = "NL";
+            }
+            else if (_obstype == OBSCOMBIN::RAW_ALL || _obstype == OBSCOMBIN::RAW_MIX)
+            {
+                if (dd.ambtype == "AMB_L1")
+                    band = "L1";
+                else if (dd.ambtype == "AMB_L2")
+                    band = "L2";
+                else if (dd.ambtype == "AMB_L3")
+                    band = "L3";
+                else if (dd.ambtype == "AMB_L4")
+                    band = "L4";
+                else if (dd.ambtype == "AMB_L5")
+                    band = "L5";
+                else
+                {
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_prepareCovariance] : unsupported RAW ambiguity type {}",
+                                            dd.ambtype);
+                    return false;
+                }
+            }
+            else
+            {
+                if (_spdlog)
+                    SPDLOG_LOGGER_ERROR(_spdlog,
+                                        "ERROR[t_gambiguity::_prepareCovariance] : unsupported observation combination for NL covariance");
+                return false;
+            }
+
+            t_covariance_combination combination;
+            for (int endpoint = 0; endpoint < 2; ++endpoint)
+            {
+                const string &sat = get<0>(dd.ddSats[endpoint]);
+                const string wavelength_key = sat.substr(0, 1) == "R" ? sat : sat.substr(0, 1);
+                const auto wavelength_it = _sys_wavelen.find(wavelength_key);
+                if (wavelength_it == _sys_wavelen.end())
+                {
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_prepareCovariance] : no wavelength table for {} in NL mode",
+                                            sat);
+                    return false;
+                }
+
+                const auto band_it = wavelength_it->second.find(band);
+                const double wavelength = band_it == wavelength_it->second.end() ? 0.0 : band_it->second;
+                if (!std::isfinite(wavelength) || wavelength <= 0.0)
+                {
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_prepareCovariance] : non-positive wavelength for {} in NL mode ({}={})",
+                                            sat, band, wavelength);
+                    return false;
+                }
+
+                const int parameter_index = get<1>(dd.ddSats[endpoint]);
+                if (parameter_index <= 0 || parameter_index > qx.Nrows())
+                {
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_prepareCovariance] : invalid parameter index {} for {} endpoint {} in NL mode (Qx={})",
+                                            parameter_index, sat, endpoint, qx.Nrows());
+                    return false;
+                }
+
+                combination.parameter_index[endpoint] = parameter_index;
+                combination.coefficient[endpoint] = (endpoint == 0 ? 1.0 : -1.0) / wavelength;
+            }
+
+            // UPD/OSB products remain deterministic corrections in the
+            // existing ambiguity model, so their formal errors are not added.
+            value.push_back(dd.rnl);
+            combinations.push_back(combination);
+        }
+
+        covariance.resize(_DD.size());
+        covariance = 0;
+        for (size_t i = 0; i < combinations.size(); ++i)
+        {
+            for (size_t j = i; j < combinations.size(); ++j)
+            {
+                double covariance_value = 0.0;
+                for (int row_endpoint = 0; row_endpoint < 2; ++row_endpoint)
+                {
+                    for (int col_endpoint = 0; col_endpoint < 2; ++col_endpoint)
+                    {
+                        covariance_value += combinations[i].coefficient[row_endpoint] *
+                                            qx(combinations[i].parameter_index[row_endpoint],
+                                               combinations[j].parameter_index[col_endpoint]) *
+                                            combinations[j].coefficient[col_endpoint];
+                    }
+                }
+
+                if (!std::isfinite(covariance_value))
+                {
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_prepareCovariance] : non-finite covariance at ({}, {}) in NL mode",
+                                            i + 1, j + 1);
+                    return false;
+                }
+                covariance(i + 1, j + 1) = covariance_value;
+            }
+        }
+
+        const double sigma0 = amb_cmn->sigma0();
+        if (!std::isfinite(sigma0) || sigma0 <= 0.0)
+        {
+            if (_spdlog)
+                SPDLOG_LOGGER_ERROR(_spdlog,
+                                    "ERROR[t_gambiguity::_prepareCovariance] : invalid sigma0 {} in NL mode",
+                                    sigma0);
+            return false;
+        }
+        covariance = covariance * pow(sigma0, 2);
+
+        if (value.size() != _DD.size() || covariance.Nrows() != static_cast<int>(value.size()) ||
+            covariance.Ncols() != static_cast<int>(value.size()))
+        {
+            if (_spdlog)
+                SPDLOG_LOGGER_ERROR(_spdlog,
+                                    "ERROR[t_gambiguity::_prepareCovariance] : NL dimension mismatch (DD={}, value={}, covariance={}x{})",
+                                    _DD.size(), value.size(), covariance.Nrows(), covariance.Ncols());
+            return false;
+        }
+        return true;
     }
 
     bool t_gambiguity::_prepareCovarianceWL(t_gamb_cmn *amb_cmn, SymmetricMatrix &covariance, vector<double> &value, string mode)
     {
-        int row = 0, col = 0;
-        double lambda_1 = 0.0, lambda_2 = 0.0;
-        ColumnVector op_dd(4);
-        // set covariance-matrix
+        value.clear();
+        t_wide_lane_definition definition;
+        if (!wide_lane_definition(ambiguity_combination(mode), definition))
+        {
+            if (_spdlog)
+                SPDLOG_LOGGER_ERROR(_spdlog, "ERROR[t_gambiguity::_prepareCovarianceWL] : unsupported ambiguity mode {}", mode);
+            return false;
+        }
+
+        if (_DD.empty())
+        {
+            if (_spdlog)
+                SPDLOG_LOGGER_DEBUG(_spdlog, "Warning[t_gambiguity::_prepareCovarianceWL] : no {} ambiguity candidates", mode);
+            return false;
+        }
+
+        struct t_covariance_combination
+        {
+            int parameter_index[4];
+            double coefficient[4];
+        };
+
+        const double coefficient_sign[4] = {1.0, -1.0, -1.0, 1.0};
+        vector<t_covariance_combination> combinations;
+        combinations.reserve(_DD.size());
+        const SymmetricMatrix qx = amb_cmn->Qx();
+
+        for (const auto &dd : _DD)
+        {
+            if (dd.ddSats.size() < 4)
+            {
+                if (_spdlog)
+                    SPDLOG_LOGGER_ERROR(_spdlog,
+                                        "ERROR[t_gambiguity::_prepareCovarianceWL] : {} candidate has {} ambiguity endpoints, expected 4",
+                                        mode, dd.ddSats.size());
+                return false;
+            }
+
+            const double ambiguity_value = dd.*definition.float_value;
+            if (!std::isfinite(ambiguity_value) || ambiguity_value == 0.0)
+            {
+                if (_spdlog)
+                    SPDLOG_LOGGER_ERROR(_spdlog,
+                                        "ERROR[t_gambiguity::_prepareCovarianceWL] : {} candidate {}-{} has no valid float ambiguity",
+                                        mode, get<0>(dd.ddSats[0]), get<0>(dd.ddSats[1]));
+                return false;
+            }
+
+            t_covariance_combination combination;
+            for (int endpoint = 0; endpoint < 4; ++endpoint)
+            {
+                const string &sat = get<0>(dd.ddSats[endpoint]);
+                const char *band = endpoint < 2 ? definition.first_band : definition.second_band;
+                const string wavelength_key = sat.substr(0, 1) == "R" ? sat : sat.substr(0, 1);
+                const auto wavelength_it = _sys_wavelen.find(wavelength_key);
+                if (wavelength_it == _sys_wavelen.end())
+                {
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_prepareCovarianceWL] : no wavelength table for {} in {} mode",
+                                            sat, mode);
+                    return false;
+                }
+
+                const auto band_it = wavelength_it->second.find(band);
+                const double wavelength = band_it == wavelength_it->second.end() ? 0.0 : band_it->second;
+                if (!std::isfinite(wavelength) || wavelength <= 0.0)
+                {
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_prepareCovarianceWL] : non-positive wavelength for {} in {} mode ({}={})",
+                                            sat, mode, band, wavelength);
+                    return false;
+                }
+
+                const int parameter_index = get<1>(dd.ddSats[endpoint]);
+                if (parameter_index <= 0 || parameter_index > qx.Nrows())
+                {
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_prepareCovarianceWL] : invalid parameter index {} for {} endpoint {} in {} mode (Qx={})",
+                                            parameter_index, sat, endpoint, mode, qx.Nrows());
+                    return false;
+                }
+
+                combination.parameter_index[endpoint] = parameter_index;
+                combination.coefficient[endpoint] = coefficient_sign[endpoint] / wavelength;
+            }
+
+            value.push_back(ambiguity_value);
+            combinations.push_back(combination);
+        }
+
         covariance.resize(_DD.size());
         covariance = 0;
 
-        for (auto itdd1 = _DD.begin(); itdd1 != _DD.end(); itdd1++)
+        for (size_t i = 0; i < combinations.size(); ++i)
         {
-            string sat = get<0>(itdd1->ddSats[0]);
-            if (mode == "WL")
+            for (size_t j = i; j < combinations.size(); ++j)
             {
-                if (itdd1->rwl == 0)
-                    continue;
-                if (sat.substr(0, 1) != "R")
+                double covariance_value = 0.0;
+                for (int row_endpoint = 0; row_endpoint < 4; ++row_endpoint)
                 {
-                    lambda_1 = _sys_wavelen[sat.substr(0, 1)]["L1"];
-                    lambda_2 = _sys_wavelen[sat.substr(0, 1)]["L2"];
-                }
-                else
-                {
-                    lambda_1 = _sys_wavelen[sat]["L1"];
-                    lambda_2 = _sys_wavelen[sat]["L2"];
-                }
-
-                value.push_back(itdd1->rwl);
-            }
-            else if (mode == "EWL")
-            {
-                if (itdd1->rewl == 0)
-                    continue;
-                if (sat.substr(0, 1) != "R")
-                {
-                    lambda_1 = _sys_wavelen[sat.substr(0, 1)]["L2"];
-                    lambda_2 = _sys_wavelen[sat.substr(0, 1)]["L3"];
-                }
-                else
-                {
-                    lambda_1 = _sys_wavelen[sat]["L2"];
-                    lambda_2 = _sys_wavelen[sat]["L3"];
+                    for (int col_endpoint = 0; col_endpoint < 4; ++col_endpoint)
+                    {
+                        covariance_value += combinations[i].coefficient[row_endpoint] *
+                                            qx(combinations[i].parameter_index[row_endpoint],
+                                               combinations[j].parameter_index[col_endpoint]) *
+                                            combinations[j].coefficient[col_endpoint];
+                    }
                 }
 
-                value.push_back(itdd1->rewl);
-            }
-
-            // Row of covariance-matrix
-
-            row = distance(_DD.begin(), itdd1) + 1;
-
-            for (auto itdd2 = itdd1; itdd2 != _DD.end(); itdd2++)
-            {
-                if (get<0>(itdd1->ddSats[0]).substr(1) != get<0>(itdd2->ddSats[0]).substr(1))
-                    continue;
-                // Column of covariance-matrix
-                col = distance(_DD.begin(), itdd2) + 1;
-                op_dd << 1 / (lambda_1 * lambda_1) << -1 / (lambda_1 * lambda_2) << -1 / (lambda_1 * lambda_2) << 1 / (lambda_2 * lambda_2);
-                Matrix Q(2, 2);
-
-                // Covariance of ambiguity between four satellites
-                Q(1, 1) = amb_cmn->Qx()(get<1>(itdd1->ddSats[0]), get<1>(itdd2->ddSats[0])) * op_dd(1) + amb_cmn->Qx()(get<1>(itdd1->ddSats[0]), get<1>(itdd2->ddSats[2])) * op_dd(2) + amb_cmn->Qx()(get<1>(itdd1->ddSats[2]), get<1>(itdd2->ddSats[0])) * op_dd(3) + amb_cmn->Qx()(get<1>(itdd1->ddSats[2]), get<1>(itdd2->ddSats[2])) * op_dd(4);
-                Q(1, 2) = amb_cmn->Qx()(get<1>(itdd1->ddSats[0]), get<1>(itdd2->ddSats[1])) * op_dd(1) + amb_cmn->Qx()(get<1>(itdd1->ddSats[0]), get<1>(itdd2->ddSats[3])) * op_dd(2) + amb_cmn->Qx()(get<1>(itdd1->ddSats[2]), get<1>(itdd2->ddSats[1])) * op_dd(3) + amb_cmn->Qx()(get<1>(itdd1->ddSats[2]), get<1>(itdd2->ddSats[3])) * op_dd(4);
-                Q(2, 1) = amb_cmn->Qx()(get<1>(itdd1->ddSats[1]), get<1>(itdd2->ddSats[0])) * op_dd(1) + amb_cmn->Qx()(get<1>(itdd1->ddSats[1]), get<1>(itdd2->ddSats[2])) * op_dd(2) + amb_cmn->Qx()(get<1>(itdd1->ddSats[3]), get<1>(itdd2->ddSats[0])) * op_dd(3) + amb_cmn->Qx()(get<1>(itdd1->ddSats[3]), get<1>(itdd2->ddSats[2])) * op_dd(4);
-                Q(2, 2) = amb_cmn->Qx()(get<1>(itdd1->ddSats[1]), get<1>(itdd2->ddSats[1])) * op_dd(1) + amb_cmn->Qx()(get<1>(itdd1->ddSats[1]), get<1>(itdd2->ddSats[3])) * op_dd(2) + amb_cmn->Qx()(get<1>(itdd1->ddSats[3]), get<1>(itdd2->ddSats[1])) * op_dd(3) + amb_cmn->Qx()(get<1>(itdd1->ddSats[3]), get<1>(itdd2->ddSats[3])) * op_dd(4);
-
-                // Combinatorial transformation
-                covariance(row, col) = (Q(1, 1) - Q(2, 1) - Q(1, 2) + Q(2, 2)); // unit [cycle]
+                if (!std::isfinite(covariance_value))
+                {
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_prepareCovarianceWL] : non-finite covariance at ({}, {}) in {} mode",
+                                            i + 1, j + 1, mode);
+                    return false;
+                }
+                covariance(i + 1, j + 1) = covariance_value;
             }
         }
         // Unit weight
-        covariance = covariance * pow(amb_cmn->sigma0(), 2);
-
-        if (value.size() == 0 || covariance.size() == 0)
+        const double sigma0 = amb_cmn->sigma0();
+        if (!std::isfinite(sigma0) || sigma0 <= 0.0)
         {
             if (_spdlog)
-                SPDLOG_LOGGER_ERROR(_spdlog, "ERROR[t_gambiguity::_prepareCovariance] : prepare Double-Difference covariance is Wrong");
+                SPDLOG_LOGGER_ERROR(_spdlog,
+                                    "ERROR[t_gambiguity::_prepareCovarianceWL] : invalid sigma0 {} in {} mode",
+                                    sigma0, mode);
             return false;
         }
-        else
-            return true;
+        covariance = covariance * pow(sigma0, 2);
+
+        if (value.size() != _DD.size() || covariance.Nrows() != static_cast<int>(value.size()) ||
+            covariance.Ncols() != static_cast<int>(value.size()))
+        {
+            if (_spdlog)
+                SPDLOG_LOGGER_ERROR(_spdlog,
+                                    "ERROR[t_gambiguity::_prepareCovarianceWL] : {} dimension mismatch (DD={}, value={}, covariance={}x{})",
+                                    mode, _DD.size(), value.size(), covariance.Nrows(), covariance.Ncols());
+            return false;
+        }
+        return true;
     }
 
     double t_gambiguity::_lambdaSearch(const Matrix &anor, const vector<double> &fltpar, vector<int> &ibias, double *boot)
@@ -1832,6 +2105,22 @@ namespace great
 
     bool t_gambiguity::_ambSolve(t_gamb_cmn *amb_cmn, vector<int> &fixed_amb, string mode)
     {
+        const t_ambiguity_combination combination = ambiguity_combination(mode);
+        if (combination == t_ambiguity_combination::UNKNOWN)
+        {
+            if (_spdlog)
+                SPDLOG_LOGGER_ERROR(_spdlog, "Error[t_gambiguity::_ambSolve] : unknown ambiguity mode {}", mode);
+            return false;
+        }
+
+        t_wide_lane_definition wide_lane;
+        if (combination != t_ambiguity_combination::NL && !wide_lane_definition(combination, wide_lane))
+        {
+            if (_spdlog)
+                SPDLOG_LOGGER_ERROR(_spdlog, "Error[t_gambiguity::_ambSolve] : missing mode definition for {}", mode);
+            return false;
+        }
+
         SymmetricMatrix covariance;
         vector<double> value;
         double ratio = 0.0;
@@ -1843,15 +2132,14 @@ namespace great
             {
                 string sat1 = get<0>(itdd->ddSats[0]);
                 string sat2 = get<0>(itdd->ddSats[1]);
-                if (mode == "WL" && _WL_flag[sat1][sat2][itdd->site])
+                if (combination == t_ambiguity_combination::WL && _WL_flag[sat1][sat2][itdd->site])
                     _IWL[sat1][sat2][itdd->site] = itdd->iwl;
-                if (mode == "EWL" && _EWL_flag[sat1][sat2][itdd->site])
+                else if (combination == t_ambiguity_combination::EWL && _EWL_flag[sat1][sat2][itdd->site])
                     _IEWL[sat1][sat2][itdd->site] = itdd->iewl;
-                if (mode == "EWL24" && _EWL24_flag[sat1][sat2])
+                else if (combination == t_ambiguity_combination::EWL24 && _EWL24_flag[sat1][sat2])
                     _IEWL24[sat1][sat2] = itdd->iewl24;
-                if (mode == "EWL25" && _EWL25_flag[sat1][sat2])
+                else if (combination == t_ambiguity_combination::EWL25 && _EWL25_flag[sat1][sat2])
                     _IEWL25[sat1][sat2] = itdd->iewl25;
-                continue;
             }
             if (_spdlog)
                 SPDLOG_LOGGER_DEBUG(_spdlog, "Warning[t_gambiguity::_ambSolve] : too few candidate ambiguities for LAMBDA Search");
@@ -1859,7 +2147,7 @@ namespace great
         }
 
         // get covariance-matrix for SD- or DD-ambiguities
-        if (mode == "NL")
+        if (combination == t_ambiguity_combination::NL)
         {
             if (!_prepareCovariance(amb_cmn, covariance, value))
                 return false;
@@ -1934,13 +2222,21 @@ namespace great
             
             auto itdd_tmp = _DD.begin() + index - 1;
 
-            if (mode == "WL")
+            if (combination == t_ambiguity_combination::WL)
             {
                 _WL_flag[get<0>(itdd_tmp->ddSats[0])][get<0>(itdd_tmp->ddSats[1])][itdd_tmp->site] = false;
             }
-            else if (mode == "EWL")
+            else if (combination == t_ambiguity_combination::EWL)
             {
                 _EWL_flag[get<0>(itdd_tmp->ddSats[0])][get<0>(itdd_tmp->ddSats[1])][itdd_tmp->site] = false;
+            }
+            else if (combination == t_ambiguity_combination::EWL24)
+            {
+                _EWL24_flag[get<0>(itdd_tmp->ddSats[0])][get<0>(itdd_tmp->ddSats[1])] = false;
+            }
+            else if (combination == t_ambiguity_combination::EWL25)
+            {
+                _EWL25_flag[get<0>(itdd_tmp->ddSats[0])][get<0>(itdd_tmp->ddSats[1])] = false;
             }
             Matrix_remRC(covariance, index, index);
             value.erase(value.begin() + index - 1);
@@ -1972,73 +2268,30 @@ namespace great
         amb_cmn->set_ratio(ratio);
         amb_cmn->set_boot(boot);
 
-        // if nl amb. fixed successfully , replace inl with fixed_nlamb
-        if (mode == "WL")
-        {
-            if (fixed_amb.size() != 0)
-            {
-                for (auto it_dd = _DD.begin(); it_dd != _DD.end(); it_dd++)
-                {
-                    if (it_dd->rwl == 0)
-                        continue;
-                    int ipos = distance(_DD.begin(), it_dd);
-                    it_dd->iwl = fixed_amb[ipos];
-                }
-                return true;
-            }
-
-            else
-            {
-                if (_spdlog)
-                    SPDLOG_LOGGER_DEBUG(_spdlog, "Warning[t_gambiguity::_ambSolve] : LAMBDA Search can't get candidate fixed ambiguities");
-                return false;
-            }
-        }
-        else if (mode == "EWL")
-        {
-            if (fixed_amb.size() != 0)
-            {
-                for (auto it_dd = _DD.begin(); it_dd != _DD.end(); it_dd++)
-                {
-                    if (it_dd->rewl == 0)
-                        continue;
-                    int ipos = distance(_DD.begin(), it_dd);
-                    it_dd->iewl = fixed_amb[ipos];
-                }
-                return true;
-            }
-            else
-            {
-                if (_spdlog)
-                    SPDLOG_LOGGER_DEBUG(_spdlog, "Warning[t_gambiguity::_ambSolve] : LAMBDA Search can't get candidate fixed ambiguities");
-                return false;
-            }
-        }
-        else if (mode == "NL")
-        {
-            if (fixed_amb.size() != 0)
-            {
-                for (auto it_dd = _DD.begin(); it_dd != _DD.end(); it_dd++)
-                {
-                    int ipos = distance(_DD.begin(), it_dd);
-                    it_dd->inl = fixed_amb[ipos];
-                }
-                return true;
-            }
-            else
-            {
-                if (_spdlog)
-                    SPDLOG_LOGGER_DEBUG(_spdlog, "Warning[t_gambiguity::_ambSolve] : LAMBDA Search can't get candidate fixed ambiguities");
-                return false;
-            }
-        }
-
-        else
+        if (fixed_amb.empty())
         {
             if (_spdlog)
-                SPDLOG_LOGGER_ERROR(_spdlog, "Error[t_gambiguity::_ambSolve] : Unknown Combination[NL/WL/EWL] : " + mode);
+                SPDLOG_LOGGER_DEBUG(_spdlog, "Warning[t_gambiguity::_ambSolve] : LAMBDA Search can't get candidate fixed ambiguities");
             return false;
         }
+
+        if (fixed_amb.size() != _DD.size())
+        {
+            if (_spdlog)
+                SPDLOG_LOGGER_ERROR(_spdlog,
+                                    "Error[t_gambiguity::_ambSolve] : {} fixed ambiguity dimension mismatch (fixed={}, DD={})",
+                                    mode, fixed_amb.size(), _DD.size());
+            return false;
+        }
+
+        for (size_t i = 0; i < _DD.size(); ++i)
+        {
+            if (combination == t_ambiguity_combination::NL)
+                _DD[i].inl = fixed_amb[i];
+            else
+                _DD[i].*wide_lane.integer_value = fixed_amb[i];
+        }
+        return true;
     }
 
     bool t_gambiguity::_addFixConstraint(t_gflt *gflt)
@@ -2228,17 +2481,23 @@ namespace great
             }
             else
             {
-                if (mode == "WL")
+                if (mode != "WL")
                 {
-                    if (!itdd->isWlFixed || itdd->rwl == 0)
-                        continue;
-                    lambda_11 = _sys_wavelen[sat1]["L1"];
-                    lambda_12 = _sys_wavelen[sat3]["L2"];
-                    lambda_21 = _sys_wavelen[sat2]["L1"];
-                    lambda_22 = _sys_wavelen[sat4]["L2"];
-
-                    integer = (itdd->iwl - itdd->sd_rwl_cor);
+                    if (_spdlog)
+                        SPDLOG_LOGGER_ERROR(_spdlog,
+                                            "ERROR[t_gambiguity::_addFixConstraintWL] : GLONASS does not support {} fixed constraints",
+                                            mode);
+                    return false;
                 }
+
+                if (!itdd->isWlFixed || itdd->rwl == 0)
+                    continue;
+                lambda_11 = _sys_wavelen[sat1]["L1"];
+                lambda_12 = _sys_wavelen[sat3]["L2"];
+                lambda_21 = _sys_wavelen[sat2]["L1"];
+                lambda_22 = _sys_wavelen[sat4]["L2"];
+
+                integer = (itdd->iwl - itdd->sd_rwl_cor);
                 Ba = 1 / lambda_11;
                 Bb = -1 / lambda_12;
                 Bc = -1 / lambda_21;
