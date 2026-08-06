@@ -2602,7 +2602,6 @@ ceres::Solver::Options gfgomsf::t_gpvtfgo::_ceres_solver_options() const
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     if (!ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::SUITE_SPARSE) &&
-        !ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::CX_SPARSE) &&
         !ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::EIGEN_SPARSE))
     {
         options.linear_solver_type = ceres::DENSE_QR;
@@ -2612,10 +2611,6 @@ ceres::Solver::Options gfgomsf::t_gpvtfgo::_ceres_solver_options() const
     }
     const int threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
     options.num_threads = threads;
-    // SuiteSparse/CXSparse use num_linear_solver_threads for the sparse
-    // factorization; keeping it in sync with num_threads lets a multi-core
-    // build parallelize the elimination without touching residual evaluation.
-    options.num_linear_solver_threads = threads;
     return options;
 }
 

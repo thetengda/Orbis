@@ -1416,7 +1416,7 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 
 		for (int i = 0; i <= _rover_count; i++)
 		{
-			ceres::LocalParameterization* local_parameterization = new PoseLocalParameterization();
+			ceres::Manifold* local_parameterization = new PoseLocalParameterization();
 			problem.AddParameterBlock(_para_pose[i], SIZE_POSE, local_parameterization);
 			if (_imu_enable)
 				problem.AddParameterBlock(_para_speed_bias[i], SIZE_SPEEDBIAS);
@@ -1710,7 +1710,7 @@ void gfgomsf::t_gfgo_gins::_gins_optimization_PPP() {
 
 		for (int i = 0; i <= _rover_count; i++)
 		{
-			ceres::LocalParameterization* local_parameterization = new PoseLocalParameterization();
+			ceres::Manifold* local_parameterization = new PoseLocalParameterization();
 			problem.AddParameterBlock(_para_pose[i], SIZE_POSE, local_parameterization);
 			if (_imu_enable)
 				problem.AddParameterBlock(_para_speed_bias[i], SIZE_SPEEDBIAS);

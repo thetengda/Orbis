@@ -30,7 +30,7 @@ namespace gfgo
 
 		return true;
 	}
-	bool PoseLocalParameterization::ComputeJacobian(const double *x, double *jacobian) const
+	bool PoseLocalParameterization::PlusJacobian(const double *x, double *jacobian) const
 	{
 		Eigen::Map<Eigen::Matrix<double, 7, 6, Eigen::RowMajor>> j(jacobian);
 		j.topRows<6>().setIdentity();
@@ -38,6 +38,7 @@ namespace gfgo
 
 		return true;
 
+		// A fuller Jacobian (still 7x6, tangent->ambient); kept for reference.
 		// Eigen::Map<Eigen::Matrix<double, 7, 6, Eigen::RowMajor>> J(jacobian);
 		// J.setZero();
 		//
@@ -56,6 +57,42 @@ namespace gfgo
 		// // q_new = q * deltaQ(delta_theta)
 		// J.block<3, 3>(3, 3) = 0.5 * (qw * Eigen::Matrix3d::Identity() + S);
 		// J.block<1, 3>(6, 3) = -0.5 * qv.transpose();
+
+		return true;
+	}
+
+	bool PoseLocalParameterization::Minus(const double *y, const double *x, double *y_minus_x) const
+	{
+		Eigen::Map<const Eigen::Vector3d> yp(y), xp(x);
+		Eigen::Map<const Eigen::Quaterniond> yq(y + 3), xq(x + 3);
+
+		Eigen::Map<Eigen::Vector3d> dp(y_minus_x);
+		Eigen::Map<Eigen::Vector3d> dtheta(y_minus_x + 3);
+
+		// Plus(x, delta) = y  =>  delta_p = y_p - x_p ;  dtheta = 2*Im(xq^-1 * yq)
+		dp = yp - xp;
+		Eigen::Quaterniond dq = (xq.conjugate() * yq).normalized();
+		dtheta = 2.0 * dq.vec();
+
+		return true;
+	}
+
+	bool PoseLocalParameterization::MinusJacobian(const double *x, double *jacobian) const
+	{
+		// d(Minus)/dy | (y=x), size 6x7. Position part: [I3 0]; rotation part from
+		// d(2*Im(xq^-1*yq))/dy. Quaternion stored xyzw at x+3.
+		Eigen::Map<Eigen::Matrix<double, 6, 7, Eigen::RowMajor>> j(jacobian);
+		j.setZero();
+		j.topLeftCorner<3, 3>().setIdentity();
+
+		const double xw = x[6];
+		const Eigen::Vector3d xv(x[3], x[4], x[5]);
+		Eigen::Matrix3d S;   // skew of xv
+		S <<  0.0, -xv.z(),  xv.y(),
+		      xv.z(),   0.0, -xv.x(),
+		     -xv.y(),  xv.x(),   0.0;
+		j.block<3, 3>(3, 3) = 2.0 * (xw * Eigen::Matrix3d::Identity() - S);
+		j.block<3, 1>(3, 6) = -2.0 * xv;
 
 		return true;
 	}

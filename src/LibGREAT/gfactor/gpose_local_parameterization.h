@@ -16,9 +16,9 @@
 namespace gfgo
 {
 	/**
-	*@brief  Class for pose parameterization
+	*@brief  Class for pose parameterization (Ceres 2.x Manifold, quaternion stored xyzw)
 	*/
-	class  LibGREAT_LIBRARY_EXPORT PoseLocalParameterization : public ceres::LocalParameterization
+	class  LibGREAT_LIBRARY_EXPORT PoseLocalParameterization : public ceres::Manifold
 	{
 		public:
 		/**
@@ -26,19 +26,29 @@ namespace gfgo
 		 * Updates position and quaternion using tangent space increments
 		 * Maintains quaternion normalization for SO(3) manifold
 		 */
-		virtual bool Plus(const double *x, const double *delta, double *x_plus_delta) const;
+		virtual bool Plus(const double *x, const double *delta, double *x_plus_delta) const override;
 
 		/**
-		 * @brief Compute pose parameterization Jacobian
+		 * @brief Compute pose parameterization Jacobian (tangent -> ambient)
 		 * Returns identity mapping for position and quaternion tangent space
 		 */
-		virtual bool ComputeJacobian(const double *x, double *jacobian) const;
+		virtual bool PlusJacobian(const double *x, double *jacobian) const override;
+
+		/**
+		 * @brief Inverse of Plus: ambient difference -> tangent vector
+		 */
+		virtual bool Minus(const double *y, const double *x, double *y_minus_x) const override;
+
+		/**
+		 * @brief Jacobian of Minus w.r.t. y evaluated at y = x (ambient -> tangent)
+		 */
+		virtual bool MinusJacobian(const double *x, double *jacobian) const override;
 
 
-		virtual int GlobalSize() const { return 7; };
+		virtual int AmbientSize() const override { return 7; };
 
 
-		virtual int LocalSize() const { return 6; };
+		virtual int TangentSize() const override { return 6; };
 	};
 
 }
