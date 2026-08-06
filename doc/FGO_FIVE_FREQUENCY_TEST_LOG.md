@@ -141,3 +141,30 @@
 - 硬错误扫描：NL/WL/EWL 协方差、未知组合、非正波长、参数索引、非有限协方差、`sigma0`、维数、`Map key not found`、`_selectAmb Wrong`、Ceres failure、观测组合失败均为 0。既有非致命噪声包括每组 239 条空的 `t_gpvtfgo` ERROR 级标记，以及 ATX 对未使用频率码和输入路径跳过的初始化消息；不计为求解失败。
 - 最终构建复核：沙箱内首次增量构建仅因 MSBuild `FileTracker` 权限返回 `E_ACCESSDENIED`，按相同命令在允许环境重跑后，`GREAT_PVTFGO` 与 `GREAT_GINSFGO` Release 均成功。SHA-256：`GREAT_PVTFGO.exe=2751E8DF3C8E0E80A74883AD847748A41EA5F8D80ADBECA907F8F873C7194B43`，`LibGREAT.dll=714620EA84BE7BCD039902CF69AC4AF326B25B4F9236F484CF73CBD3C1316C66`，`GREAT_GINSFGO.exe=A9184116BA9A2A7ADF2A79CCE4D3598A90E8223C112859DA89FCC3C4D67C2F71`。
 - 结论：五频 RAW 的 UPD 与 OSB 固定流程在最终 NL/WL 完整协方差实现上均通过双站两小时验收；Win64 参数地址不再截断，Bias-SINEX 入口正确，OSB 缺失信号按设计局部跳过。下一阶段以这些结果作为 `NONE` 基线，实现参数反馈和可边缘化固定约束反馈。
+
+### 阶段 4：固定结果反馈到因子图（NONE / PARAMETER / CONSTRAINT 三模式）
+
+- 输入提交：`df67f88 fix(fgo): load Bias-SINEX safely on 64-bit` 之后的待提交工作集。
+- 目标：把上一阶段"只写 FLT 条件解、图仍全 Float"的缺口补上，让整周固定结果真正反馈进 Ceres 因子图。新增可配置反馈模式 `<fgo><ambiguity_feedback_mode>`（`NONE` / `PARAMETER` / `CONSTRAINT`），三种模式仅作用于固定阶段，浮点估计完全共用。
+- 配置解析：`t_gsetfgo::ambiguity_feedback_mode()` 读取 `<fgo><ambiguity_feedback_mode>` 并做大小写归一；未知值抛出 `std::invalid_argument`。`GREAT_PVTFGO` 与 `GREAT_GINSFGO` 两个入口在启动时立即校验该配置，非法值快速失败（打印配置错误并返回 1），避免"退出码 0、固定模式未生效"的静默退化。
+- FLT 侧导出（`gambfix/t_gambiguity`）：`t_gambiguity::_addFixConstraint()` 把每条被接受的 NL 绝对双差方程写入 `FixedAmbiguityConstraint`（两端参数索引、卫星、类型、系数 `Ba/Bb`、目标整数、信息量），放入 `_pending_fixed_constraints`；`processBatch()` 在条件更新前调用 `_validateFixedConstraints()` 复核全部导出方程，任一出错（非有限、系数为零、参数越界或残差超容差 `max(1e-6, 10/sqrt(info))`）则回退到 `fltpreAMB` 并拒绝本次候选。只有通过校验后 `_pending` 才转为 `_fixed_constraints`，并 commit 固定历史（`_DD_previous`、连续固定计数），保证被拒绝的候选不会污染后续参考星选取和连续计数。另新增 `_amb_fixed=false` 时代理恢复与约束向量清空。
+- 图侧消费（`t_gpfgo`）：新增 `RawFixedConstraint` 与 `fixed_ambiguity_factor.h` 中 Ceres `FixedAmbiguityFactor`（绝对方程 `ca*a + cb*b = target`，权重为 `sqrt_information`）。
+  - `NONE`：维持旧行为，仅写条件 FLT，图不反馈。
+  - `PARAMETER`：`_apply_RAW_parameter_feedback()` 调用 `_write_RAW_fixed_solution()` 把固定解直接写回图参数并用 `_double_to_vector()` 落地，设 `_graph_ambiguity_fixed=true`。
+  - `CONSTRAINT`：`_apply_RAW_constraint_feedback()` 把固定方程作为 `FixedAmbiguityFactor` 残差块逐条加入 Ceres 图，回写参数后重解；失败时用回滚 lambda（删除已安装残差、恢复被替换约束、恢复参数快照、恢复浮点 `_all_para_win` 与旧的固定标志）整段回退到上一有效图。`_rebuild_RAW_posterior_transactional()` 以事务方式重建后验，失败即整体还原。
+- 输出：`.flt` 的 `AmbStatus` 现在由 `_graph_ambiguity_fixed ? "Fixed" : "Float"` 决定，即图真正进入固定状态才标 Fixed；被拒绝/回退的历元保持 Float。
+- 三种模式浮点结果一致性验证（逐历元 X/Y/Z 全相等，`max_dxyz=0`）：UPD/OSB × GODN/HARB × 2h 与 20m 的 8 组浮点运行，`none-para`、`none-cons`、`para-cons` 逐历元差异均为 0，证明三模式共用同一浮点滤波、差异只出现在固定解上。
+- 外部真值：改用 `sample_data/refsnx/IGS0OPSSNX_20233050000_01D_01D_CRD.SNX` 的 `SOLUTION/ESTIMATE` 块坐标（GODN `1130760.6931,-4831298.6759,3994155.1990`、HARB `5084657.6078,2670325.4787,-2768480.8416` m）作为 GODN/HARB 参考，替代此前的 `APX`/共识均值（旧 APX 在 HARB X 方向偏差约 2.4 m）。验证脚本以 `平面收敛门限 10 cm 且高程 20 cm（连续 5 分钟窗口内全部满足）`统计收敛时间、首次固定、首次正确固定与精度（GODN 用 SINEX 估计值、HARB 亦用 SINEX，不再需要共识）。
+- 验证结果要点（DF/FF × 双频/浮点 × FLT/FGO-none/para/cons）：
+  - 三模式固定率在多数组合无差别；双频 RAW 固定解精度 FLT 与 FGO 同为 cm 级（水平 0.3--0.8 cm，高程 1.3--2.5 cm），已接近 SINEX 参考本身精度。
+  - FLT 收敛最快且首固定即正确；GO 首固定极快（0--3.5 min）但常"先错后对"——首正确固定显著晚于首固定（如 `2023305` GODN FF 固定 FGO 首正确 6.5 min、DF-IF 首正确 13--16 min），仅报首固定时间会系统性高估 GO 的收敛速度。
+  - FGO 五频固定率低于 FLT（66.7--84.6%），DF-IF 组合固定率最低（56.7--82.5%）且收敛最慢（4--16 min）。
+  - 浮点上 FGO 收敛普遍慢于 FLT（约 1.5--3 倍，例 `OSB` HARB FF 浮点 FGO 全程未达 20 cm 高程门限，vRMS 37.7 cm，标"未收敛"）。
+
+### 阶段 4 现存问题（open items）
+
+- 首正确固定 vs 首固定："先固定但定错、后纠正"在 FGO 上普遍出现，尤其 FF 与 DF-IF；当前 `.flt` 只提供 `AmbStatus`，无法从输出区分"错误固定"与"正确固定"，验证脚本需以 SINEX 真值为准后验标注。建议后续输出固定 ratio 与参与固定弧段信息，便于离线甄别 false fixed。
+- 三模式的图中真实固定判定差异：`CONSTRAINT` 在候选顶点不足（空区间、窗口滑动）时语义复杂（依赖 `_raw_prior_contains_fixed_information` 与历史约束图），`PARAMETER` 直接覆盖参数，`NONE` 不回馈；三者对"固定后回落浮点"重现速度（收敛保持）的行为不一致，需要长段一致性回归锁定。
+- 固定率对固定策略的敏感性：`2023305` 的 HARB DF 固定 `CONSTRAINT` 固定率仅 32.8%、RMS 15--19 cm，明显劣于 `PARAMETER`/`NONE`；这是当前数据里最突出的策略差异，指向约束模式在该站(UPD 模式、低可见性弧段)的数值稳定性或参数化问题，未归入本次验收。
+- FGO 进程墙钟/内存：单进程工作集约 1 GB，两小时双站并行总墙钟约 1.9 k s；对项目级多站批处理仍是瓶颈，未优化。
+- 现有待办：`t_gambiguity` 的 `_validateFixedConstraints` 对 GLONASS FDMA 非 NL 约束显式拒绝；RAW 后期初态与后验矩阵列序、早期收敛前的错误固定传播（前两历元误差约 0.53--0.59 m）仍需在更长测段和多站上回归。

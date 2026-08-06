@@ -32,6 +32,15 @@ int main(int argc, char** argv)
 	gset.app("G-Nut/PVT", "0.9.0", "$Rev: 2448 $", "(gnss@pecny.cz)", __DATE__, __TIME__);
 	// Get the arguments from the command line
 	gset.arg(argc, argv, true, false);
+	try
+	{
+		(void)dynamic_cast<t_gsetfgo *>(&gset)->ambiguity_feedback_mode();
+	}
+	catch (const std::exception &error)
+	{
+		cerr << "GREAT_GINSFGO configuration error: " << error.what() << endl;
+		return 1;
+	}
 
 	auto log_type = dynamic_cast<t_gsetout*>(&gset)->log_type();
 	auto log_level = dynamic_cast<t_gsetout*>(&gset)->log_level();

@@ -11,6 +11,10 @@
 
 #include "gsetfgo.h"
 
+#include <algorithm>
+#include <cctype>
+#include <stdexcept>
+
 namespace gfgo
 {
 	t_gsetfgo::t_gsetfgo()
@@ -438,4 +442,24 @@ namespace gfgo
 			return x_double;
 		}
 	}	
+
+	AMB_FEEDBACK_MODE t_gsetfgo::ambiguity_feedback_mode()
+	{
+		std::lock_guard<t_gmutex> lock(_gmutex);
+		string mode = trim(_doc.child(XMLKEY_ROOT).child(XMLKEY_FGO)
+			.child_value("ambiguity_feedback_mode"));
+
+		std::transform(mode.begin(), mode.end(), mode.begin(),
+			[](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+		if (mode.empty() || mode == "NONE")
+			return AMB_FEEDBACK_MODE::NONE;
+		if (mode == "PARAMETER")
+			return AMB_FEEDBACK_MODE::PARAMETER;
+		if (mode == "CONSTRAINT")
+			return AMB_FEEDBACK_MODE::CONSTRAINT;
+
+		throw std::invalid_argument(
+			"Unsupported <fgo><ambiguity_feedback_mode>: " + mode +
+			" (expected NONE, PARAMETER, or CONSTRAINT)");
+	}
 }

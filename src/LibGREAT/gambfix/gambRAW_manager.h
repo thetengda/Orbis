@@ -5,6 +5,20 @@
 
 namespace gfgomsf
 {
+    struct RawArcInfo
+    {
+        int arc_id = -1;
+        int sat_id = -1;
+        int start_node = -1;
+        int end_node = -1;
+        string sat;
+        string stable_key;
+        FREQ_SEQ freq = FREQ_X;
+        t_gtime beg;
+        t_gtime end;
+        bool current_search_arc = false;
+    };
+
     /**
      * RAW PPP ambiguity manager.
      *
@@ -39,6 +53,8 @@ namespace gfgomsf
         int getLatestSatId(const string &sat_name) const;
         bool hasActiveArc(int sat_index, FREQ_SEQ freq) const;
         bool getArcTime(int amb_id, t_gtime &beg, t_gtime &end) const;
+        bool containsArc(int amb_id) const noexcept;
+        bool getArcInfo(int amb_id, RawArcInfo &info) const;
 
         static string ambiguityKey(const string &sat, FREQ_SEQ freq, int arc);
         static string ionosphereKey(const string &sat, int node);

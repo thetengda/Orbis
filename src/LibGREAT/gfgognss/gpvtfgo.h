@@ -33,8 +33,10 @@
 #include "gfactor/pseudorange_RAW_factor.h"
 #include "gfactor/carrierphase_RAW_factor.h"
 #include "gfactor/random_walk_factor.h"
+#include "gset/gsetfgo.h"
 
 #include <map>
+#include <memory>
 #include <set>
 
 
@@ -92,6 +94,19 @@ namespace gfgomsf
 			int amb_index = -1;
 			int node = -1;
 		};
+
+		struct RawFixedConstraint
+		{
+			int amb_a = -1;
+			int amb_b = -1;
+			double coefficient_a = 0.0;
+			double coefficient_b = 0.0;
+			double target = 0.0;
+			double sqrt_information = 0.0;
+			t_gtime fixed_epoch;
+		};
+
+		using RawConstraintKey = std::pair<int, int>;
 
 		class DDEquMsg
 		{
@@ -213,6 +228,20 @@ namespace gfgomsf
 		bool _batch_remove = false;
 		bool _initial_prior = true;
 		std::unordered_map<ParameterBlockKey, int> amb_idx;
+		AMB_FEEDBACK_MODE _ambiguity_feedback_mode = AMB_FEEDBACK_MODE::NONE;
+		bool _graph_ambiguity_fixed = false;
+		bool _raw_prior_contains_fixed_information = false;
+		std::unique_ptr<ceres::Problem> _raw_feedback_problem;
+		std::unique_ptr<GNSSInfo> _raw_float_search_info;
+		t_gallpar _raw_float_search_parameters;
+		std::set<int> _raw_feedback_problem_ambiguities;
+		std::map<RawConstraintKey, RawFixedConstraint> _raw_fixed_constraints;
+		// Provenance for integer equations already absorbed into the current
+		// marginalization prior. Explicit equations remain in the map above.
+		std::map<RawConstraintKey, RawFixedConstraint> _raw_prior_fixed_constraint_history;
+		std::map<RawConstraintKey, ceres::ResidualBlockId> _raw_feedback_constraint_residuals;
+		std::vector<double *> _raw_posterior_scalar_addresses;
+		std::vector<int> _raw_posterior_scalar_ambiguity_ids;
 
 
 
@@ -337,6 +366,21 @@ namespace gfgomsf
 
 		virtual int _optimization_PPP();
 		int _optimization_PPP_RAW();
+		bool _solve_PPP_RAW_problem(ceres::Problem &problem,
+			ceres::Solver::Summary &summary) const;
+		void _add_RAW_fixed_constraints(ceres::Problem &problem,
+			const std::set<int> &problem_ambiguities);
+		bool _write_RAW_fixed_solution(t_gallpar &fixed_parameters);
+		bool _translate_RAW_fixed_constraints(
+			const std::vector<great::FixedAmbiguityConstraint> &source,
+			std::map<RawConstraintKey, RawFixedConstraint> &pending,
+			std::map<RawConstraintKey, RawFixedConstraint> &candidates);
+		bool _validate_RAW_constraint_values(
+			const std::map<RawConstraintKey, RawFixedConstraint> &constraints) const;
+		bool _apply_RAW_parameter_feedback();
+		bool _apply_RAW_constraint_feedback();
+		bool _rebuild_RAW_posterior_transactional(ceres::Problem &problem);
+		void _reset_RAW_feedback_problem();
 		/**
 		 * @brief Roll back a rejected pure-PPP candidate epoch
 		 *

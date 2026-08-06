@@ -184,6 +184,9 @@ namespace great
 
     int t_gambiguity::processBatch(const t_gtime &t, t_gflt *gflt, string mode)
     {
+        _pending_fixed_constraints.clear();
+        _fixed_constraints.clear();
+
         if (_gupd && _gupd->wl_epo_mode())
         { 
             _ewl_Upd_time = t;
@@ -362,12 +365,22 @@ namespace great
         if (mode == "NL")
         {
             if (!_addFixConstraint(gflt))
+            {
+                *gflt = fltpreAMB;
+				_pending_fixed_constraints.clear();
+				_fixed_constraints.clear();
                 return -1;
+            }
         }
         else
         {
             if (!_addFixConstraintWL(gflt, mode))
+            {
+                *gflt = fltpreAMB;
+				_pending_fixed_constraints.clear();
+				_fixed_constraints.clear();
                 return -1;
+            }
         }
 
         // amb state should be determined after addFixConstraint.
@@ -375,15 +388,6 @@ namespace great
         {
             _amb_fixed = true;
             _fixed_amb_num = fixed_amb.size();
-            _DD_previous[mode] = _DD;
-            for (auto it_dd = _DD.begin(); it_dd != _DD.end(); it_dd++)
-            {
-                _fix_epo_num[mode][get<0>(it_dd->ddSats[0])]++;
-                _last_fix_time[mode][get<0>(it_dd->ddSats[0])] = t;
-                _fix_epo_num[mode][get<0>(it_dd->ddSats[1])]++;
-                _last_fix_time[mode][get<0>(it_dd->ddSats[1])] = t;
-            }
-            _last_fix_time[mode]["sum"] = t;
         }
         else
         {
@@ -394,10 +398,60 @@ namespace great
         if (_spdlog)
             _spdlog->debug("Ambiguity resolution {}: accepted={} ratio={:.3f} fixed={}",
                            mode, _amb_fixed, _outRatio, _fixed_amb_num);
+
+		if (!_amb_fixed)
+		{
+			*gflt = fltpreAMB;
+			auto restored_param = gflt->param();
+			auto restored_dx = gflt->dx();
+			updateFixParam(restored_param, restored_dx);
+			_pending_fixed_constraints.clear();
+			_fixed_constraints.clear();
+			return 1;
+		}
+
         auto tmp_param = gflt->param();
         auto tmp_dx = gflt->dx();
 
         updateFixParam(tmp_param, tmp_dx); 
+
+        if (mode == "NL" && _amb_fixed)
+        {
+            if (!_validateFixedConstraints(gflt))
+            {
+				*gflt = fltpreAMB;
+				auto restored_param = gflt->param();
+				auto restored_dx = gflt->dx();
+				updateFixParam(restored_param, restored_dx);
+                _amb_fixed = false;
+                _fixed_amb_num = 0;
+                _pending_fixed_constraints.clear();
+                _fixed_constraints.clear();
+                if (_spdlog)
+                    SPDLOG_LOGGER_WARN(
+                        _spdlog,
+                        "Warning[t_gambiguity::processBatch] : rejected fixed candidate because its absolute constraints were not satisfied");
+                return -1;
+            }
+            _fixed_constraints = _pending_fixed_constraints;
+        }
+
+        // Commit fixing history only after the conditional state and, for
+        // NL, every exported absolute equation have passed validation. This
+        // keeps a rejected feedback candidate from poisoning later reference
+        // selection and consecutive-fix counters.
+        if (_amb_fixed)
+        {
+            _DD_previous[mode] = _DD;
+            for (auto it_dd = _DD.begin(); it_dd != _DD.end(); ++it_dd)
+            {
+                _fix_epo_num[mode][get<0>(it_dd->ddSats[0])]++;
+                _last_fix_time[mode][get<0>(it_dd->ddSats[0])] = t;
+                _fix_epo_num[mode][get<0>(it_dd->ddSats[1])]++;
+                _last_fix_time[mode][get<0>(it_dd->ddSats[1])] = t;
+            }
+            _last_fix_time[mode]["sum"] = t;
+        }
 
         return 1;
     }
@@ -2377,6 +2431,18 @@ namespace great
             B.push_back(make_pair(index_sat1, Ba));
             B.push_back(make_pair(index_sat2, Bb));
 
+            FixedAmbiguityConstraint constraint;
+            constraint.parameter_index_a = index_sat1;
+            constraint.parameter_index_b = index_sat2;
+            constraint.satellite_a = get<0>(itdd->ddSats[0]);
+            constraint.satellite_b = get<0>(itdd->ddSats[1]);
+            constraint.ambiguity_type = itdd->ambtype;
+            constraint.coefficient_a = Ba;
+            constraint.coefficient_b = Bb;
+            constraint.target = integer;
+            constraint.information = p0;
+            _pending_fixed_constraints.push_back(constraint);
+
             Matrix B_mat;
             SymmetricMatrix P_mat;
             ColumnVector l_mat;
@@ -2402,6 +2468,69 @@ namespace great
 
         return true;
         //////========================= Virtual observation equation ===========================================
+    }
+
+    bool t_gambiguity::_validateFixedConstraints(t_gflt *gflt)
+    {
+        if (!gflt || _pending_fixed_constraints.empty())
+            return false;
+
+        const int parameter_count = gflt->npar_number();
+        const ColumnVector dx = gflt->dx();
+        const SymmetricMatrix qx = gflt->Qx();
+        if (parameter_count <= 0 ||
+            dx.Nrows() != parameter_count ||
+            qx.Nrows() != parameter_count ||
+            qx.Ncols() != parameter_count ||
+            static_cast<int>(_param.parNumber()) != parameter_count)
+            return false;
+
+        for (int row = 1; row <= parameter_count; ++row)
+        {
+            if (!std::isfinite(dx(row)))
+                return false;
+            for (int col = row; col <= parameter_count; ++col)
+            {
+                if (!std::isfinite(qx(row, col)))
+                    return false;
+            }
+        }
+
+        for (const auto &constraint : _pending_fixed_constraints)
+        {
+            if (constraint.parameter_index_a <= 0 ||
+                constraint.parameter_index_a > parameter_count ||
+                constraint.parameter_index_b <= 0 ||
+                constraint.parameter_index_b > parameter_count ||
+                constraint.parameter_index_a == constraint.parameter_index_b ||
+                !std::isfinite(constraint.coefficient_a) ||
+                !std::isfinite(constraint.coefficient_b) ||
+				std::fabs(constraint.coefficient_a) <= 1e-15 ||
+				std::fabs(constraint.coefficient_b) <= 1e-15 ||
+                !std::isfinite(constraint.target) ||
+                !std::isfinite(constraint.information) ||
+                constraint.information <= 0.0)
+                return false;
+
+            const double value_a = _param[constraint.parameter_index_a - 1].value();
+            const double value_b = _param[constraint.parameter_index_b - 1].value();
+            const double residual = constraint.coefficient_a * value_a +
+                                    constraint.coefficient_b * value_b -
+                                    constraint.target;
+            const double tolerance = (std::max)(1e-6, 10.0 / std::sqrt(constraint.information));
+            if (!std::isfinite(value_a) || !std::isfinite(value_b) ||
+                !std::isfinite(residual) || std::fabs(residual) > tolerance)
+            {
+                if (_spdlog)
+                    SPDLOG_LOGGER_WARN(
+                        _spdlog,
+                        "Warning[t_gambiguity::_validateFixedConstraints] : {} {}-{} residual {:.6g} exceeds tolerance {:.6g}",
+                        constraint.ambiguity_type, constraint.satellite_a,
+                        constraint.satellite_b, residual, tolerance);
+                return false;
+            }
+        }
+        return true;
     }
 
 
@@ -2528,7 +2657,7 @@ namespace great
         {
             gflt->update();
         }
-        catch (exception e)
+        catch (const exception &e)
         {
             if (_spdlog)
                 SPDLOG_LOGGER_DEBUG(_spdlog, e.what(), "Solve Equation Fail!");

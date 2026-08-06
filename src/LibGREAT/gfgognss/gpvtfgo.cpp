@@ -13,8 +13,11 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <limits>
+#include <queue>
 #include <stdexcept>
 #include "gmodels/gprecisebiasGPP.h"
+#include "gfactor/fixed_ambiguity_factor.h"
 #include "gfactor/ginitial_pose_factor.h"
 #include "gfactor/raw_factor_common.h"
 #include <gutils/gcommon.cpp>
@@ -33,6 +36,16 @@ namespace
         }
         return model_q * graph_dt / stochastic_dt;
     }
+
+    const char *ambiguity_feedback_mode_name(gfgo::AMB_FEEDBACK_MODE mode)
+    {
+        switch (mode)
+        {
+        case gfgo::AMB_FEEDBACK_MODE::PARAMETER: return "PARAMETER";
+        case gfgo::AMB_FEEDBACK_MODE::CONSTRAINT: return "CONSTRAINT";
+        default: return "NONE";
+        }
+    }
 }
 
 
@@ -41,6 +54,21 @@ t_gspp(site, gset, spdlog),
 t_gpvtflt(site, site_base, gset, spdlog, allproc),
 t_gfgo(gset),
 t_gfgo_para(gset) {
+	if (!_isBase)
+	{
+		auto *fgo_setting = dynamic_cast<t_gsetfgo *>(gset);
+		if (fgo_setting)
+			_ambiguity_feedback_mode = fgo_setting->ambiguity_feedback_mode();
+		if (_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE &&
+			(_observ != OBSCOMBIN::RAW_ALL || _fix_mode == FIX_MODE::NO))
+		{
+			if (_spdlog)
+				_spdlog->warn(
+					"PPP FGO ambiguity feedback {} requires RAW_ALL with ambiguity fixing enabled; using NONE",
+					ambiguity_feedback_mode_name(_ambiguity_feedback_mode));
+			_ambiguity_feedback_mode = AMB_FEEDBACK_MODE::NONE;
+		}
+	}
 	/*t_gbiasmodel *precise_bias(new t_gprecisebiasGPP(_allproc, _spdlog, gset));
 	_gbias_model = precise_bias;*/
 	_gbias_model = new t_gprecisebiasFGO(_allproc, _spdlog, gset);
@@ -52,10 +80,17 @@ t_gfgo_para(gset) {
 				"PPP FGO observation mode RAW_ALL: one code/phase equation per "
 				"selected frequency, SION per satellite, and per-frequency ambiguities");
 			if (_fix_mode != FIX_MODE::NO)
-				_spdlog->info(
-					"PPP FGO RAW_ALL ambiguity fixing uses the FGO posterior "
-					"equation and the legacy WL/NL ambiguity resolver; fixed "
-					"constraints are not fed back into the FGO graph");
+			{
+				if (_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::NONE)
+					_spdlog->info(
+						"PPP FGO RAW_ALL ambiguity fixing uses the FGO posterior "
+						"equation and the legacy WL/NL ambiguity resolver; graph "
+						"feedback mode is NONE");
+				else
+					_spdlog->info(
+						"PPP FGO RAW_ALL ambiguity feedback mode {} is enabled",
+						ambiguity_feedback_mode_name(_ambiguity_feedback_mode));
+			}
 		}
 		else if (_observ == OBSCOMBIN::RAW_MIX)
 		{
@@ -216,6 +251,7 @@ t_gfgo_para(gset) {
 
 gfgomsf::t_gpvtfgo::~t_gpvtfgo()
 {
+	 _reset_RAW_feedback_problem();
 	 delete _last_gnss_info;
 	 delete _last_gnss_marginalization_info;
 	 delete _gbias_model;
@@ -228,6 +264,15 @@ gfgomsf::t_gpvtfgo::~t_gpvtfgo()
 
 	 }
 
+}
+
+void gfgomsf::t_gpvtfgo::_reset_RAW_feedback_problem()
+{
+	_raw_feedback_problem.reset();
+	_raw_float_search_info.reset();
+	_raw_float_search_parameters.delAllParam();
+	_raw_feedback_problem_ambiguities.clear();
+	_raw_feedback_constraint_residuals.clear();
 }
 
 int gfgomsf::t_gpvtfgo::processBatch(const t_gtime &beg_r, const t_gtime &end_r, bool prtOut)
@@ -303,7 +348,12 @@ int gfgomsf::t_gpvtfgo::processBatch(const t_gtime &beg_r, const t_gtime &end_r,
 
 		if (_spdlog) SPDLOG_LOGGER_ERROR(_spdlog, string("t_gpvtfgo ") ,_site + now.str_ymdhms(" processing epoch: "));
 		double percent = now.diff(_beg_time) / _end_time.diff(_beg_time) * 100.0;
-		std::cerr << "\r" << now.str_ymdhms() << setw(5) << " Q = " << (_amb_state ? 1 : 2) << fixed << setprecision(1) << setw(6) << percent << "%";
+		const bool reported_fixed =
+			(!_isBase && _observ == OBSCOMBIN::RAW_ALL &&
+			 _ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE)
+				? _graph_ambiguity_fixed
+				: _amb_state;
+		std::cerr << "\r" << now.str_ymdhms() << setw(5) << " Q = " << (reported_fixed ? 1 : 2) << fixed << setprecision(1) << setw(6) << percent << "%";
 
 		if (_sampling > 1)
 			now.add_secs(int(sign * _sampling)); // =<1Hz data
@@ -320,6 +370,7 @@ int gfgomsf::t_gpvtfgo::processBatch(const t_gtime &beg_r, const t_gtime &end_r,
 
 int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* data_rover, vector<t_gsatdata>* data_base)
 {
+	_graph_ambiguity_fixed = false;
 	if (!_get_gdata(now, data_rover, data_base))
 		return -1;
 	if (!_isBase)
@@ -438,25 +489,54 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 
 	if (_last_gnss_info->valid)
 	{
-		publish_foat();
-		// RAW_ALL and IONO_FREE both use the solved FGO posterior as the
-		// input to the existing WL/NL ambiguity resolver.  As in the IF path,
-		// this produces the conditional fixed solution for the FLT output;
-		// it does not add integer constraints back to the Ceres graph.
-		if (_pre_amb_resolution())
-			_amb_resolution();
+		const bool raw_feedback = !_isBase && _observ == OBSCOMBIN::RAW_ALL &&
+			_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE;
+		if (raw_feedback)
+		{
+			if (_pre_amb_resolution())
+				_amb_resolution();
+			else
+				_amb_state = false;
+
+			if (_amb_state)
+			{
+				const bool feedback_ok =
+					_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::PARAMETER
+						? _apply_RAW_parameter_feedback()
+						: _apply_RAW_constraint_feedback();
+				if (!feedback_ok && _spdlog)
+					_spdlog->warn(
+						"PPP RAW ambiguity feedback {} rejected at {}; retaining the last valid graph solution",
+						ambiguity_feedback_mode_name(_ambiguity_feedback_mode),
+						_epoch.str_ymdhms());
+			}
+			publish_foat();
+		}
 		else
-			_amb_state = false;
+		{
+			// Preserve the historical NONE/IF ordering exactly: publish the
+			// floating graph before producing the separate conditional FLT output.
+			publish_foat();
+			if (_pre_amb_resolution())
+				_amb_resolution();
+			else
+				_amb_state = false;
+		}
 	}
 	else
 	{
 		std::cout << "Epoch: " << runEpoch.sow() << "solving faild" << endl;
+		_reset_RAW_feedback_problem();
 		if (_isBase)
 			clearWindow();
 		else
 			_rollback_current_ppp_node();
 		return -1;
 	}
+
+	// A retained Ceres problem owns a prior cost function that references the
+	// current marginalization object. Destroy it before replacing that prior.
+	_reset_RAW_feedback_problem();
 
 	if (_isBase)
 	{
@@ -472,12 +552,22 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 	//	_initial_prior = false;
 
 	_slide_window();
+	if (!_isBase && _observ == OBSCOMBIN::RAW_ALL &&
+		_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE)
+		return _graph_ambiguity_fixed ? 1 : 0;
 	return _amb_state ? 1 : 0;
 }
 
 
 void gfgomsf::t_gpvtfgo::clearWindow()
 {
+	_reset_RAW_feedback_problem();
+	_raw_fixed_constraints.clear();
+	_raw_prior_fixed_constraint_history.clear();
+	_raw_posterior_scalar_addresses.clear();
+	_raw_posterior_scalar_ambiguity_ids.clear();
+	_raw_prior_contains_fixed_information = false;
+	_graph_ambiguity_fixed = false;
 	for (int i = 0; i <= gwindow_size; ++i)
 		_raw_sion_initial_nodes[i].clear();
 
@@ -592,8 +682,8 @@ void gfgomsf::t_gpvtfgo::publish_foat()
     set<string> ambs = _all_para_win.amb_prns();
     int nsat = ambs.size();
 
-    // get amb status
-    string amb = "Float";
+	// get graph ambiguity status (separate from the conditional FLT state)
+	string amb = _graph_ambiguity_fixed ? "Fixed" : "Float";
 
     t_gtriple blh;
     xyz2ell(xyz_ecc, blh, true);
@@ -2301,17 +2391,24 @@ bool gfgomsf::t_gpvtfgo::_remove_outlier_sat(const pair<string, int>& outlier)
 }
 bool gfgomsf::t_gpvtfgo::_pre_amb_resolution()
 {
+	GNSSInfo *ambiguity_info = _last_gnss_info;
 	t_gallpar construct_para = _all_para_win;
+	if (_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::CONSTRAINT &&
+		_raw_float_search_info && _raw_float_search_info->valid)
+	{
+		ambiguity_info = _raw_float_search_info.get();
+		construct_para = _raw_float_search_parameters;
+	}
 	int nobs_total, npar_number;
 	Matrix A_fgo;
 	SymmetricMatrix P_fgo;
 	ColumnVector l_fgo, dx_fgo;
 	SymmetricMatrix Qx0_fgo,Qx_fgo;
 	double vtpv_fgo;
-	if (!_last_gnss_info || !_last_gnss_info->valid)
+	if (!ambiguity_info || !ambiguity_info->valid)
 		return false;
-	nobs_total = _last_gnss_info->linearized_jacobians.rows();
-	npar_number = _last_gnss_info->linearized_jacobians.cols();
+	nobs_total = ambiguity_info->linearized_jacobians.rows();
+	npar_number = ambiguity_info->linearized_jacobians.cols();
 	if (npar_number != construct_para.parNumber() || npar_number <= 0)
 	{
 		if (_spdlog)
@@ -2334,15 +2431,15 @@ bool gfgomsf::t_gpvtfgo::_pre_amb_resolution()
 	Qx0_fgo = 0.0;
 	Qx_fgo.ReSize(npar_number);
 	Qx_fgo = 0.0;
-	_sig_unit= _last_gnss_info->sig_unit;
-	vtpv_fgo = _last_gnss_info->vtpv;
+	_sig_unit= ambiguity_info->sig_unit;
+	vtpv_fgo = ambiguity_info->vtpv;
 	//for Qx
 	for (int i = 0; i < npar_number; i++)
 	{
 		for (int j = 0; j < npar_number; j++)
 		{
 			//Qx_fgo(i + 1, j + 1) = _last_gnss_info->Qx(i, j);
-			Qx0_fgo(i + 1, j + 1) = _last_gnss_info->Qx(i, j);
+			Qx0_fgo(i + 1, j + 1) = ambiguity_info->Qx(i, j);
 		}
 	}
 	Qx_fgo = Qx0_fgo;
@@ -2351,7 +2448,7 @@ bool gfgomsf::t_gpvtfgo::_pre_amb_resolution()
 	{
 		for (int j = 0; j < npar_number; j++)
 		{
-			A_fgo(i + 1, j + 1) = _last_gnss_info->linearized_jacobians(i, j);
+			A_fgo(i + 1, j + 1) = ambiguity_info->linearized_jacobians(i, j);
 		}
 	}
 	//for P
@@ -2359,13 +2456,13 @@ bool gfgomsf::t_gpvtfgo::_pre_amb_resolution()
 	{
 		for (int j = 0; j < nobs_total; j++)
 		{
-			P_fgo(i + 1, j + 1) = _last_gnss_info->weight(i,j);
+			P_fgo(i + 1, j + 1) = ambiguity_info->weight(i,j);
 		}
 	}
 	//for l
 	for (int i = 0; i < nobs_total; i++)
 	{
-		l_fgo(i + 1) = _last_gnss_info->linearized_residuals(i);
+		l_fgo(i + 1) = ambiguity_info->linearized_residuals(i);
 	}
 	_filter->add_data(construct_para, dx_fgo, Qx_fgo, _sig_unit, Qx0_fgo);
 	_filter->add_data(A_fgo, P_fgo, l_fgo);
@@ -2501,8 +2598,596 @@ int gfgomsf::t_gpvtfgo::_optimization()
 	return 1;
 }
 
+bool gfgomsf::t_gpvtfgo::_solve_PPP_RAW_problem(
+    ceres::Problem &problem, ceres::Solver::Summary &summary) const
+{
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::DENSE_QR;
+    options.max_num_iterations = 10;
+    options.trust_region_strategy_type = ceres::DOGLEG;
+    ceres::Solve(options, &problem, &summary);
+
+    const bool usable = summary.termination_type != ceres::FAILURE &&
+                        std::isfinite(summary.final_cost) &&
+                        summary.final_cost >= 0.0;
+    if (!usable && _spdlog)
+        _spdlog->error("PPP RAW Ceres solve failed: {}", summary.BriefReport());
+    return usable;
+}
+
+void gfgomsf::t_gpvtfgo::_add_RAW_fixed_constraints(
+    ceres::Problem &problem, const std::set<int> &problem_ambiguities)
+{
+    _raw_feedback_constraint_residuals.clear();
+    if (_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::CONSTRAINT)
+        return;
+
+    for (const auto &entry : _raw_fixed_constraints)
+    {
+        const RawFixedConstraint &constraint = entry.second;
+        if (constraint.amb_a < 0 || constraint.amb_a >= NUM_OF_ARC ||
+            constraint.amb_b < 0 || constraint.amb_b >= NUM_OF_ARC ||
+            problem_ambiguities.count(constraint.amb_a) == 0 ||
+            problem_ambiguities.count(constraint.amb_b) == 0)
+            continue;
+
+        double *address_a = _para_AMB_RAW[constraint.amb_a];
+        double *address_b = _para_AMB_RAW[constraint.amb_b];
+        if (!problem.HasParameterBlock(address_a) ||
+            !problem.HasParameterBlock(address_b) ||
+            problem.ParameterBlockSize(address_a) != 1 ||
+            problem.ParameterBlockSize(address_b) != 1 ||
+            !std::isfinite(constraint.sqrt_information) ||
+            constraint.sqrt_information <= 0.0)
+        {
+            if (_spdlog)
+                _spdlog->error(
+                    "PPP RAW fixed constraint {}-{} has invalid graph endpoints",
+                    constraint.amb_a, constraint.amb_b);
+            continue;
+        }
+
+        _raw_feedback_constraint_residuals[entry.first] =
+            problem.AddResidualBlock(
+                new FixedAmbiguityFactor(
+                    constraint.coefficient_a, constraint.coefficient_b,
+                    constraint.target, constraint.sqrt_information),
+                nullptr, address_a, address_b);
+    }
+}
+
+bool gfgomsf::t_gpvtfgo::_write_RAW_fixed_solution(
+    t_gallpar &fixed_parameters)
+{
+    const size_t parameter_count = _all_para_win.parNumber();
+    if (parameter_count == 0 || fixed_parameters.parNumber() != parameter_count ||
+        _raw_posterior_scalar_addresses.size() != parameter_count ||
+        _raw_posterior_scalar_ambiguity_ids.size() != parameter_count)
+        return false;
+
+    vector<double> values(parameter_count,
+                          std::numeric_limits<double>::quiet_NaN());
+    vector<bool> assigned(parameter_count, false);
+    for (unsigned int i = 0; i < fixed_parameters.parNumber(); ++i)
+    {
+        const t_gpar &fixed = fixed_parameters[i];
+        if (fixed.index <= 0 ||
+            fixed.index > static_cast<int>(parameter_count) ||
+            assigned[static_cast<size_t>(fixed.index - 1)] ||
+            !std::isfinite(fixed.value()))
+            return false;
+
+        const t_gpar &graph = _all_para_win[fixed.index - 1];
+        if (fixed.parType != graph.parType || fixed.prn != graph.prn)
+            return false;
+        assigned[static_cast<size_t>(fixed.index - 1)] = true;
+        values[static_cast<size_t>(fixed.index - 1)] = fixed.value();
+    }
+
+    for (size_t i = 0; i < parameter_count; ++i)
+    {
+        if (!assigned[i] || !_raw_posterior_scalar_addresses[i] ||
+            !std::isfinite(values[i]))
+            return false;
+    }
+
+    // Validation is complete; publish the whole conditional solution in one
+    // transaction, including coordinates, clocks, atmosphere, ISBs and SION.
+    for (size_t i = 0; i < parameter_count; ++i)
+    {
+        *_raw_posterior_scalar_addresses[i] = values[i];
+        _all_para_win[static_cast<unsigned int>(i)].value(values[i]);
+    }
+    return true;
+}
+
+bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
+    const std::vector<great::FixedAmbiguityConstraint> &source,
+    std::map<RawConstraintKey, RawFixedConstraint> &pending,
+    std::map<RawConstraintKey, RawFixedConstraint> &candidates)
+{
+    pending.clear();
+	candidates.clear();
+    const size_t parameter_count = _all_para_win.parNumber();
+    if (source.empty() || parameter_count == 0 ||
+        _raw_posterior_scalar_addresses.size() != parameter_count ||
+        _raw_posterior_scalar_ambiguity_ids.size() != parameter_count ||
+        _param_fixed.parNumber() != parameter_count || !_ambRAW_manager)
+        return false;
+
+    vector<double> fixed_values_by_index(
+        parameter_count, std::numeric_limits<double>::quiet_NaN());
+    vector<bool> assigned(parameter_count, false);
+    for (unsigned int i = 0; i < _param_fixed.parNumber(); ++i)
+    {
+        const t_gpar &parameter = _param_fixed[i];
+        if (parameter.index <= 0 ||
+            parameter.index > static_cast<int>(parameter_count) ||
+            assigned[static_cast<size_t>(parameter.index - 1)] ||
+            !std::isfinite(parameter.value()))
+            return false;
+        const size_t index = static_cast<size_t>(parameter.index - 1);
+        const t_gpar &graph = _all_para_win[static_cast<unsigned int>(index)];
+        if (parameter.parType != graph.parType || parameter.prn != graph.prn)
+            return false;
+        assigned[index] = true;
+        fixed_values_by_index[index] = parameter.value();
+    }
+
+    map<int, double> fixed_ambiguity_values;
+    for (size_t i = 0; i < parameter_count; ++i)
+    {
+        if (!assigned[i] || !std::isfinite(fixed_values_by_index[i]))
+            return false;
+        const int amb_id = _raw_posterior_scalar_ambiguity_ids[i];
+        if (amb_id >= 0)
+            fixed_ambiguity_values[amb_id] = fixed_values_by_index[i];
+    }
+
+    auto ambiguity_type_name = [](par_type type) -> const char *
+    {
+        switch (type)
+        {
+        case par_type::AMB_L1: return "AMB_L1";
+        case par_type::AMB_L2: return "AMB_L2";
+        case par_type::AMB_L3: return "AMB_L3";
+        case par_type::AMB_L4: return "AMB_L4";
+        case par_type::AMB_L5: return "AMB_L5";
+        default: return "";
+        }
+    };
+	auto ambiguity_frequency = [](par_type type, FREQ_SEQ &frequency) -> bool
+	{
+		switch (type)
+		{
+		case par_type::AMB_L1: frequency = FREQ_1; return true;
+		case par_type::AMB_L2: frequency = FREQ_2; return true;
+		case par_type::AMB_L3: frequency = FREQ_3; return true;
+		case par_type::AMB_L4: frequency = FREQ_4; return true;
+		case par_type::AMB_L5: frequency = FREQ_5; return true;
+		default: return false;
+		}
+	};
+	auto same_constraint = [](const RawFixedConstraint &left,
+	                          const RawFixedConstraint &right) -> bool
+	{
+		return std::fabs(left.coefficient_a - right.coefficient_a) <= 1e-12 &&
+		       std::fabs(left.coefficient_b - right.coefficient_b) <= 1e-12 &&
+		       std::fabs(left.target - right.target) <= 1e-8 &&
+		       std::fabs(left.sqrt_information - right.sqrt_information) <= 1e-8;
+	};
+
+    // Canonicalize this epoch's accepted equations before inspecting old
+    // graph constraints. A changed equation for the same live arc pair can
+    // then replace its explicit predecessor transactionally instead of being
+    // rejected against the predecessor's target first.
+    for (const auto &fixed : source)
+    {
+        if (fixed.parameter_index_a <= 0 ||
+            fixed.parameter_index_a > static_cast<int>(parameter_count) ||
+            fixed.parameter_index_b <= 0 ||
+            fixed.parameter_index_b > static_cast<int>(parameter_count) ||
+            fixed.parameter_index_a == fixed.parameter_index_b ||
+            !std::isfinite(fixed.coefficient_a) ||
+            !std::isfinite(fixed.coefficient_b) ||
+            std::fabs(fixed.coefficient_a) <= 1e-15 ||
+            std::fabs(fixed.coefficient_b) <= 1e-15 ||
+            !std::isfinite(fixed.target) ||
+            !std::isfinite(fixed.information) || fixed.information <= 0.0)
+            return false;
+
+        const size_t index_a = static_cast<size_t>(fixed.parameter_index_a - 1);
+        const size_t index_b = static_cast<size_t>(fixed.parameter_index_b - 1);
+        int amb_a = _raw_posterior_scalar_ambiguity_ids[index_a];
+        int amb_b = _raw_posterior_scalar_ambiguity_ids[index_b];
+        if (amb_a < 0 || amb_b < 0 || amb_a == amb_b ||
+            amb_a >= NUM_OF_ARC || amb_b >= NUM_OF_ARC ||
+            _raw_posterior_scalar_addresses[index_a] != _para_AMB_RAW[amb_a] ||
+            _raw_posterior_scalar_addresses[index_b] != _para_AMB_RAW[amb_b] ||
+            _raw_feedback_problem_ambiguities.count(amb_a) == 0 ||
+            _raw_feedback_problem_ambiguities.count(amb_b) == 0)
+            return false;
+
+        RawArcInfo arc_a;
+        RawArcInfo arc_b;
+        if (!_ambRAW_manager->getArcInfo(amb_a, arc_a) ||
+            !_ambRAW_manager->getArcInfo(amb_b, arc_b))
+            return false;
+        const t_gpar &parameter_a = _all_para_win[fixed.parameter_index_a - 1];
+        const t_gpar &parameter_b = _all_para_win[fixed.parameter_index_b - 1];
+        FREQ_SEQ frequency_a = FREQ_X;
+        FREQ_SEQ frequency_b = FREQ_X;
+        if (parameter_a.prn != fixed.satellite_a ||
+            parameter_b.prn != fixed.satellite_b ||
+            arc_a.sat != fixed.satellite_a || arc_b.sat != fixed.satellite_b ||
+            !ambiguity_frequency(parameter_a.parType, frequency_a) ||
+            !ambiguity_frequency(parameter_b.parType, frequency_b) ||
+            arc_a.freq != frequency_a || arc_b.freq != frequency_b ||
+            (!fixed.ambiguity_type.empty() &&
+             (fixed.ambiguity_type != ambiguity_type_name(parameter_a.parType) ||
+              fixed.ambiguity_type != ambiguity_type_name(parameter_b.parType))))
+            return false;
+
+        RawFixedConstraint constraint;
+        constraint.amb_a = amb_a;
+        constraint.amb_b = amb_b;
+        constraint.coefficient_a = fixed.coefficient_a;
+        constraint.coefficient_b = fixed.coefficient_b;
+        constraint.target = fixed.target;
+        constraint.sqrt_information = std::sqrt(fixed.information);
+        constraint.fixed_epoch = _epoch;
+        if (constraint.amb_b < constraint.amb_a)
+        {
+            std::swap(constraint.amb_a, constraint.amb_b);
+            std::swap(constraint.coefficient_a, constraint.coefficient_b);
+        }
+        if (constraint.coefficient_a < 0.0)
+        {
+            constraint.coefficient_a = -constraint.coefficient_a;
+            constraint.coefficient_b = -constraint.coefficient_b;
+            constraint.target = -constraint.target;
+        }
+        const RawConstraintKey key(constraint.amb_a, constraint.amb_b);
+
+        const auto duplicate = candidates.find(key);
+        if (duplicate != candidates.end())
+        {
+            const RawFixedConstraint &other = duplicate->second;
+            if (!same_constraint(other, constraint))
+                return false;
+            continue;
+        }
+
+        const double residual = constraint.coefficient_a *
+                                    fixed_ambiguity_values[constraint.amb_a] +
+                                constraint.coefficient_b *
+                                    fixed_ambiguity_values[constraint.amb_b] -
+                                constraint.target;
+        const double tolerance = (std::max)(
+            1e-6, 10.0 / constraint.sqrt_information);
+        if (!std::isfinite(residual) || std::fabs(residual) > tolerance)
+            return false;
+        candidates[key] = constraint;
+    }
+
+    // Validate only old equations that remain installed. A key changed by
+    // this batch is removed and replaced below on the retained Ceres problem.
+    for (const auto &entry : _raw_fixed_constraints)
+    {
+        const RawFixedConstraint &constraint = entry.second;
+        if (_raw_feedback_problem_ambiguities.count(constraint.amb_a) == 0 ||
+            _raw_feedback_problem_ambiguities.count(constraint.amb_b) == 0)
+            continue;
+        const auto replacement = candidates.find(entry.first);
+        if (replacement != candidates.end() &&
+            !same_constraint(constraint, replacement->second))
+            continue;
+        if (_raw_feedback_constraint_residuals.count(entry.first) == 0)
+            return false;
+        const auto value_a = fixed_ambiguity_values.find(constraint.amb_a);
+        const auto value_b = fixed_ambiguity_values.find(constraint.amb_b);
+        if (value_a == fixed_ambiguity_values.end() ||
+            value_b == fixed_ambiguity_values.end())
+            return false;
+        const double residual = constraint.coefficient_a * value_a->second +
+                                constraint.coefficient_b * value_b->second -
+                                constraint.target;
+        const double tolerance = (std::max)(
+            1e-6, 10.0 / constraint.sqrt_information);
+        if (!std::isfinite(residual) || std::fabs(residual) > tolerance)
+            return false;
+    }
+
+    map<int, set<int>> adjacency;
+    const auto add_history_edge = [&adjacency](const RawFixedConstraint &constraint)
+    {
+        adjacency[constraint.amb_a].insert(constraint.amb_b);
+        adjacency[constraint.amb_b].insert(constraint.amb_a);
+    };
+    for (const auto &entry : _raw_prior_fixed_constraint_history)
+        add_history_edge(entry.second);
+    for (const auto &entry : _raw_fixed_constraints)
+        add_history_edge(entry.second);
+
+    auto connected = [&adjacency](int start, int goal) -> bool
+    {
+        if (start == goal)
+            return true;
+        set<int> visited;
+        queue<int> todo;
+        visited.insert(start);
+        todo.push(start);
+        while (!todo.empty())
+        {
+            const int node = todo.front();
+            todo.pop();
+            const auto neighbours = adjacency.find(node);
+            if (neighbours == adjacency.end())
+                continue;
+            for (int next : neighbours->second)
+            {
+                if (next == goal)
+                    return true;
+                if (visited.insert(next).second)
+                    todo.push(next);
+            }
+        }
+        return false;
+    };
+
+    for (const auto &candidate : candidates)
+    {
+        const RawConstraintKey &key = candidate.first;
+        const RawFixedConstraint &constraint = candidate.second;
+
+        const auto existing = _raw_fixed_constraints.find(candidate.first);
+        if (existing != _raw_fixed_constraints.end())
+        {
+            if (!same_constraint(existing->second, constraint))
+                pending[key] = constraint;
+            continue;
+        }
+		const auto absorbed = _raw_prior_fixed_constraint_history.find(key);
+		if (absorbed != _raw_prior_fixed_constraint_history.end())
+		{
+			// An equation already encoded in the Schur prior cannot be removed
+			// independently. The monotonic arc ids make a changed live equation
+			// for such a key unexpected and unsafe to stack.
+			if (!same_constraint(absorbed->second, constraint))
+				return false;
+			continue;
+		}
+
+        // Keep explicit integer equations as a spanning forest. A redundant
+        // edge is already represented by either an explicit path or a path
+        // carried by the current marginalization prior.
+        if (connected(constraint.amb_a, constraint.amb_b))
+            continue;
+        pending[key] = constraint;
+        adjacency[constraint.amb_a].insert(constraint.amb_b);
+        adjacency[constraint.amb_b].insert(constraint.amb_a);
+    }
+    return true;
+}
+
+bool gfgomsf::t_gpvtfgo::_validate_RAW_constraint_values(
+    const std::map<RawConstraintKey, RawFixedConstraint> &constraints) const
+{
+	for (const auto &entry : constraints)
+	{
+		const RawFixedConstraint &constraint = entry.second;
+		if (_raw_feedback_problem_ambiguities.count(constraint.amb_a) == 0 ||
+			_raw_feedback_problem_ambiguities.count(constraint.amb_b) == 0)
+			continue;
+		if (constraint.amb_a < 0 || constraint.amb_a >= NUM_OF_ARC ||
+			constraint.amb_b < 0 || constraint.amb_b >= NUM_OF_ARC ||
+			!std::isfinite(constraint.coefficient_a) ||
+			!std::isfinite(constraint.coefficient_b) ||
+			!std::isfinite(constraint.target) ||
+			!std::isfinite(constraint.sqrt_information) ||
+			constraint.sqrt_information <= 0.0)
+			return false;
+
+		const double residual =
+			constraint.coefficient_a * _para_AMB_RAW[constraint.amb_a][0] +
+			constraint.coefficient_b * _para_AMB_RAW[constraint.amb_b][0] -
+			constraint.target;
+		const double tolerance = (std::max)(
+			1e-6, 10.0 / constraint.sqrt_information);
+		if (!std::isfinite(residual) || std::fabs(residual) > tolerance)
+		{
+			if (_spdlog)
+				_spdlog->warn(
+					"PPP RAW fixed constraint {}-{} residual {:.6g} exceeds tolerance {:.6g}",
+					constraint.amb_a, constraint.amb_b, residual, tolerance);
+			return false;
+		}
+	}
+	return true;
+}
+
+bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
+{
+    if (!_ambfix || !_write_RAW_fixed_solution(_param_fixed))
+        return false;
+    _double_to_vector();
+    _graph_ambiguity_fixed = true;
+    if (_spdlog)
+        _spdlog->info(
+            "PPP RAW PARAMETER feedback accepted at {} ({} absolute ambiguity equations)",
+            _epoch.str_ymdhms(), _ambfix->fixedConstraints().size());
+    return true;
+}
+
+bool gfgomsf::t_gpvtfgo::_rebuild_RAW_posterior_transactional(
+    ceres::Problem &problem)
+{
+    GNSSInfo *previous_info = _last_gnss_info;
+    const t_gallpar previous_parameters = _all_para_win;
+    const vector<double *> previous_blocks = _parameter_blocks;
+    const vector<RawObsIndex> previous_obs_index = _raw_obs_index;
+    const vector<double *> previous_scalar_addresses =
+        _raw_posterior_scalar_addresses;
+    const vector<int> previous_scalar_ambiguities =
+        _raw_posterior_scalar_ambiguity_ids;
+
+    _last_gnss_info = nullptr;
+    _posteriori_test_PPP_RAW(problem);
+    if (_last_gnss_info && _last_gnss_info->valid)
+    {
+        delete previous_info;
+        return true;
+    }
+
+    delete _last_gnss_info;
+    _last_gnss_info = previous_info;
+    _all_para_win = previous_parameters;
+    _parameter_blocks = previous_blocks;
+    _raw_obs_index = previous_obs_index;
+    _raw_posterior_scalar_addresses = previous_scalar_addresses;
+    _raw_posterior_scalar_ambiguity_ids = previous_scalar_ambiguities;
+    return false;
+}
+
+bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
+{
+    if (!_ambfix || !_raw_feedback_problem)
+        return false;
+
+    map<RawConstraintKey, RawFixedConstraint> pending;
+	map<RawConstraintKey, RawFixedConstraint> candidates;
+    if (!_translate_RAW_fixed_constraints(
+			_ambfix->fixedConstraints(), pending, candidates))
+        return false;
+
+    if (pending.empty())
+    {
+        if (!_validate_RAW_constraint_values(candidates))
+			return false;
+        _graph_ambiguity_fixed =
+			_raw_prior_contains_fixed_information ||
+			!_raw_feedback_constraint_residuals.empty();
+        return _graph_ambiguity_fixed;
+    }
+
+    ceres::Problem &problem = *_raw_feedback_problem;
+    vector<double *> parameter_blocks;
+    problem.GetParameterBlocks(&parameter_blocks);
+    map<double *, vector<double>> parameter_snapshot;
+    for (double *address : parameter_blocks)
+    {
+        const int size = problem.ParameterBlockSize(address);
+        parameter_snapshot[address] = vector<double>(address, address + size);
+    }
+    const t_gallpar float_parameters = _all_para_win;
+    const bool previously_constrained = _graph_ambiguity_fixed;
+    if (!_write_RAW_fixed_solution(_param_fixed))
+        return false;
+
+    map<RawConstraintKey, RawFixedConstraint> replaced_constraints;
+    vector<RawConstraintKey> installed_keys;
+    bool topology_ok = true;
+    for (const auto &entry : pending)
+    {
+        const auto existing = _raw_fixed_constraints.find(entry.first);
+        if (existing != _raw_fixed_constraints.end())
+        {
+            const auto residual = _raw_feedback_constraint_residuals.find(entry.first);
+            if (residual == _raw_feedback_constraint_residuals.end())
+            {
+                topology_ok = false;
+                break;
+            }
+            replaced_constraints[entry.first] = existing->second;
+            problem.RemoveResidualBlock(residual->second);
+            _raw_feedback_constraint_residuals.erase(residual);
+        }
+
+        const RawFixedConstraint &constraint = entry.second;
+        double *address_a = _para_AMB_RAW[constraint.amb_a];
+        double *address_b = _para_AMB_RAW[constraint.amb_b];
+        if (!problem.HasParameterBlock(address_a) ||
+            !problem.HasParameterBlock(address_b) ||
+            problem.ParameterBlockSize(address_a) != 1 ||
+            problem.ParameterBlockSize(address_b) != 1)
+        {
+            topology_ok = false;
+            break;
+        }
+        _raw_feedback_constraint_residuals[entry.first] =
+            problem.AddResidualBlock(
+                new FixedAmbiguityFactor(
+                    constraint.coefficient_a, constraint.coefficient_b,
+                    constraint.target, constraint.sqrt_information),
+                nullptr, address_a, address_b);
+        installed_keys.push_back(entry.first);
+    }
+
+    auto rollback = [&]()
+    {
+        for (const RawConstraintKey &key : installed_keys)
+        {
+            const auto residual = _raw_feedback_constraint_residuals.find(key);
+            if (residual != _raw_feedback_constraint_residuals.end())
+            {
+                problem.RemoveResidualBlock(residual->second);
+                _raw_feedback_constraint_residuals.erase(residual);
+            }
+        }
+        for (const auto &entry : replaced_constraints)
+        {
+            const RawFixedConstraint &constraint = entry.second;
+            _raw_feedback_constraint_residuals[entry.first] =
+                problem.AddResidualBlock(
+                    new FixedAmbiguityFactor(
+                        constraint.coefficient_a, constraint.coefficient_b,
+                        constraint.target, constraint.sqrt_information),
+                    nullptr, _para_AMB_RAW[constraint.amb_a],
+                    _para_AMB_RAW[constraint.amb_b]);
+        }
+        for (const auto &entry : parameter_snapshot)
+            std::copy(entry.second.begin(), entry.second.end(), entry.first);
+        _all_para_win = float_parameters;
+        _graph_ambiguity_fixed = previously_constrained;
+    };
+
+    if (!topology_ok)
+    {
+        rollback();
+        return false;
+    }
+
+    ceres::Solver::Summary summary;
+    map<RawConstraintKey, RawFixedConstraint> expected_constraints =
+		_raw_fixed_constraints;
+	for (const auto &entry : pending)
+		expected_constraints[entry.first] = entry.second;
+    if (!_solve_PPP_RAW_problem(problem, summary) ||
+		!_validate_RAW_constraint_values(expected_constraints) ||
+		!_validate_RAW_constraint_values(candidates) ||
+		!_rebuild_RAW_posterior_transactional(problem))
+    {
+        rollback();
+        return false;
+    }
+
+    for (const auto &entry : pending)
+    {
+        _raw_fixed_constraints[entry.first] = entry.second;
+	}
+    _double_to_vector();
+    _graph_ambiguity_fixed = true;
+    if (_spdlog)
+        _spdlog->info(
+            "PPP RAW CONSTRAINT feedback accepted at {}: {} equation(s) updated, {} explicit equation(s), {}",
+            _epoch.str_ymdhms(), pending.size(), _raw_fixed_constraints.size(),
+            summary.BriefReport());
+    return true;
+}
+
 int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 {
+    _reset_RAW_feedback_problem();
     _removed_sats.clear();
     t_tictoc fgo_gnss;
     int count = 0;
@@ -2520,7 +3205,8 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
         }
 
         _vector_to_double();
-        ceres::Problem problem;
+        std::unique_ptr<ceres::Problem> problem_owner(new ceres::Problem());
+        ceres::Problem &problem = *problem_owner;
         ceres::LossFunction *loss_function = new ceres::HuberLoss(_loss_func_value);
         ceres::LossFunction *loss_function_cp = new ceres::HuberLoss(_loss_func_value);
 
@@ -2694,15 +3380,81 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
             }
         }
 
-        ceres::Solver::Options options;
-        options.linear_solver_type = ceres::DENSE_QR;
-        options.max_num_iterations = 10;
-        options.trust_region_strategy_type = ceres::DOGLEG;
         ceres::Solver::Summary summary;
-        ceres::Solve(options, &problem, &summary);
+        if (!_solve_PPP_RAW_problem(problem, summary))
+        {
+            if (_last_gnss_info)
+                _last_gnss_info->valid = false;
+            return -1;
+        }
 
         _posteriori_test_PPP_RAW(problem);
         iter_flag = _gobs_outlier_detection(outlier) >= 0;
+        if (!iter_flag && _last_gnss_info && _last_gnss_info->valid &&
+            _ambiguity_feedback_mode == AMB_FEEDBACK_MODE::CONSTRAINT)
+        {
+			// Integer search must see the observation/prior posterior before
+			// still-explicit fixed factors are re-applied. Otherwise a 1e9
+			// constraint from the preceding epoch can prevent a legitimate new
+			// arc or changed target from moving during the legacy conditional
+			// update. Fixed information already carried by the Schur prior remains
+			// part of both graphs by construction.
+			_add_RAW_fixed_constraints(problem, raw_ambiguities);
+			if (!_raw_feedback_constraint_residuals.empty())
+			{
+				vector<double *> problem_blocks;
+				problem.GetParameterBlocks(&problem_blocks);
+				map<double *, vector<double>> float_parameter_snapshot;
+				for (double *address : problem_blocks)
+				{
+					const int size = problem.ParameterBlockSize(address);
+					float_parameter_snapshot[address] =
+						vector<double>(address, address + size);
+				}
+				const t_gallpar float_parameters = _all_para_win;
+				const vector<double *> float_blocks = _parameter_blocks;
+				const vector<RawObsIndex> float_obs_index = _raw_obs_index;
+				const vector<double *> float_scalar_addresses =
+					_raw_posterior_scalar_addresses;
+				const vector<int> float_scalar_ambiguities =
+					_raw_posterior_scalar_ambiguity_ids;
+				_raw_float_search_parameters = _all_para_win;
+				_raw_float_search_info.reset(_last_gnss_info);
+				_last_gnss_info = nullptr;
+				auto restore_float_solution = [&]()
+				{
+					for (const auto &entry : float_parameter_snapshot)
+						std::copy(entry.second.begin(), entry.second.end(), entry.first);
+					delete _last_gnss_info;
+					_last_gnss_info = _raw_float_search_info.release();
+					_raw_float_search_parameters.delAllParam();
+					_all_para_win = float_parameters;
+					_parameter_blocks = float_blocks;
+					_raw_obs_index = float_obs_index;
+					_raw_posterior_scalar_addresses = float_scalar_addresses;
+					_raw_posterior_scalar_ambiguity_ids =
+						float_scalar_ambiguities;
+				};
+
+				ceres::Solver::Summary constrained_summary;
+				if (!_solve_PPP_RAW_problem(problem, constrained_summary))
+				{
+					restore_float_solution();
+					return -1;
+				}
+				_posteriori_test_PPP_RAW(problem);
+				if (!_last_gnss_info || !_last_gnss_info->valid)
+				{
+					restore_float_solution();
+					return -1;
+				}
+			}
+            _raw_feedback_problem_ambiguities = raw_ambiguities;
+            _raw_feedback_problem = std::move(problem_owner);
+            _graph_ambiguity_fixed =
+				_raw_prior_contains_fixed_information ||
+				!_raw_feedback_constraint_residuals.empty();
+        }
     } while (iter_flag);
 
     if (!_last_gnss_info || !_last_gnss_info->valid)
@@ -3256,6 +4008,7 @@ void gfgomsf::t_gpvtfgo::_commit_ppp_cycle_slips()
 
 void gfgomsf::t_gpvtfgo::_rollback_current_ppp_node()
 {
+	_reset_RAW_feedback_problem();
 	const int failed_rover = _rover_count;
 	if (_isBase || failed_rover < 0)
 		return;
@@ -3799,6 +4552,7 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP()
 
 void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
 {
+    _reset_RAW_feedback_problem();
     if (_rover_count != gwindow_size - 1 || _vRAW_msg.size() <= 1 || !_ambRAW_manager)
         return;
 
@@ -3810,6 +4564,9 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
 
     const vector<int> margin_amb = _ambRAW_manager->getMarginAmb();
     const set<int> margin_amb_set(margin_amb.begin(), margin_amb.end());
+    vector<RawConstraintKey> absorbed_constraint_keys;
+	map<RawConstraintKey, RawFixedConstraint> next_prior_fixed_history;
+	bool carried_old_prior = false;
 
     // A previous RAW prior is expressed with the current window addresses.
     // Drop all state blocks belonging to the outgoing node.  The retained
@@ -3847,15 +4604,17 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
             if (is_outgoing_address(_last_gnss_marginalization_para_blocks[i]))
                 drop_set.push_back(i);
         }
-        if (!drop_set.empty())
-        {
-            MarginalizationGNSSFactor *prior_factor =
-                new MarginalizationGNSSFactor(_last_gnss_marginalization_info);
-            gnss_marginalization_info->addResidualBlockInfo(
-                new GNSSResidualBlockInfo(prior_factor, nullptr,
-                                          _last_gnss_marginalization_para_blocks,
-                                          drop_set));
-        }
+        // Even with an empty local drop set, the previous prior must enter
+        // this Schur system: other factors define the outgoing variables and
+        // the old prior still constrains retained blocks.
+        MarginalizationGNSSFactor *prior_factor =
+            new MarginalizationGNSSFactor(_last_gnss_marginalization_info);
+        gnss_marginalization_info->addResidualBlockInfo(
+            new GNSSResidualBlockInfo(prior_factor, nullptr,
+                                      _last_gnss_marginalization_para_blocks,
+                                      drop_set));
+        carried_old_prior = true;
+        next_prior_fixed_history = _raw_prior_fixed_constraint_history;
     }
 
     auto add_raw_factor = [&](const RAWEquMsg &message, const t_gallpar &params_temp)
@@ -4039,6 +4798,44 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
         }
     }
 
+    // Keep constraints between surviving ambiguity arcs explicit. If either
+    // endpoint leaves with node 0, include a separately owned factor in this
+    // Schur system so the integer information is carried by the next prior.
+    for (const auto &entry : _raw_fixed_constraints)
+    {
+        const RawFixedConstraint &constraint = entry.second;
+        if (constraint.amb_a < 0 || constraint.amb_a >= NUM_OF_ARC ||
+            constraint.amb_b < 0 || constraint.amb_b >= NUM_OF_ARC)
+            continue;
+
+        RawArcInfo arc_a;
+        RawArcInfo arc_b;
+        const bool contains_a = _ambRAW_manager->getArcInfo(constraint.amb_a, arc_a);
+        const bool contains_b = _ambRAW_manager->getArcInfo(constraint.amb_b, arc_b);
+        const bool drop_a = !contains_a || margin_amb_set.count(constraint.amb_a) != 0 ||
+                            arc_a.end_node <= 0;
+        const bool drop_b = !contains_b || margin_amb_set.count(constraint.amb_b) != 0 ||
+                            arc_b.end_node <= 0;
+        if (!drop_a && !drop_b)
+            continue;
+
+        vector<int> drop_set;
+        if (drop_a)
+            drop_set.push_back(0);
+        if (drop_b)
+            drop_set.push_back(1);
+        gnss_marginalization_info->addResidualBlockInfo(
+            new GNSSResidualBlockInfo(
+                new FixedAmbiguityFactor(
+                    constraint.coefficient_a, constraint.coefficient_b,
+                    constraint.target, constraint.sqrt_information),
+                nullptr,
+                vector<double *>{_para_AMB_RAW[constraint.amb_a],
+                                  _para_AMB_RAW[constraint.amb_b]},
+                drop_set));
+        absorbed_constraint_keys.push_back(entry.first);
+    }
+
     if (gnss_marginalization_info->factors.empty())
     {
         delete gnss_marginalization_info;
@@ -4046,6 +4843,8 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
             delete _last_gnss_marginalization_info;
         _last_gnss_marginalization_info = nullptr;
         _last_gnss_marginalization_para_blocks.clear();
+		_raw_prior_fixed_constraint_history.clear();
+		_raw_prior_contains_fixed_information = false;
         return;
     }
 
@@ -4058,6 +4857,8 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
             delete _last_gnss_marginalization_info;
         _last_gnss_marginalization_info = nullptr;
         _last_gnss_marginalization_para_blocks.clear();
+		_raw_prior_fixed_constraint_history.clear();
+		_raw_prior_contains_fixed_information = false;
         return;
     }
 
@@ -4082,10 +4883,37 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
     }
 
     vector<double *> parameter_blocks = gnss_marginalization_info->getParameterBlocks(addr_shift);
+    if (!gnss_marginalization_info->valid ||
+        parameter_blocks.size() != gnss_marginalization_info->keep_block_size.size())
+    {
+        delete gnss_marginalization_info;
+        if (_last_gnss_marginalization_info)
+            delete _last_gnss_marginalization_info;
+        _last_gnss_marginalization_info = nullptr;
+        _last_gnss_marginalization_para_blocks.clear();
+		_raw_prior_fixed_constraint_history.clear();
+		_raw_prior_contains_fixed_information = false;
+        return;
+    }
     if (_last_gnss_marginalization_info)
         delete _last_gnss_marginalization_info;
     _last_gnss_marginalization_info = gnss_marginalization_info;
     _last_gnss_marginalization_para_blocks = parameter_blocks;
+    for (const RawConstraintKey &key : absorbed_constraint_keys)
+    {
+		const auto absorbed = _raw_fixed_constraints.find(key);
+		if (absorbed != _raw_fixed_constraints.end())
+			next_prior_fixed_history[key] = absorbed->second;
+        _raw_fixed_constraints.erase(key);
+	}
+	_raw_prior_fixed_constraint_history.swap(next_prior_fixed_history);
+	_raw_prior_contains_fixed_information =
+		!_raw_prior_fixed_constraint_history.empty();
+	if (_spdlog && (!absorbed_constraint_keys.empty() || carried_old_prior))
+		_spdlog->info(
+			"PPP RAW marginalization carried fixed information: {} equation(s) absorbed, {} equation(s) represented by the prior",
+			absorbed_constraint_keys.size(),
+			_raw_prior_fixed_constraint_history.size());
 }
 
 int gfgomsf::t_gpvtfgo::_gobs_outlier_detection(pair<string, int> & outlier)
@@ -4384,12 +5212,15 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
     _all_para_win.delAllParam();
     _parameter_blocks.clear();
     _raw_obs_index.clear();
+    _raw_posterior_scalar_addresses.clear();
+    _raw_posterior_scalar_ambiguity_ids.clear();
 
     GNSSInfo *gnss_info = new GNSSInfo();
     ceres::LossFunction *loss_function = new ceres::HuberLoss(_loss_func_value);
     ceres::LossFunction *loss_function_cp = new ceres::HuberLoss(_loss_func_value);
     map<ParameterBlockKey, vector<t_gpar>> descriptors;
     map<ParameterBlockKey, double *> parameter_addresses;
+    map<ParameterBlockKey, int> ambiguity_block_ids;
     bool parameter_addresses_consistent = true;
 
     auto make_parameter = [&](par_type type, const string &prn, double value,
@@ -4550,6 +5381,13 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
                                                         _para_AMB_RAW[message.amb_index][0],
                                                         ambiguity_beg,
                                                         ambiguity_end)});
+                const ParameterBlockKey ambiguity_key =
+                    reinterpret_cast<ParameterBlockKey>(blocks[amb_block]);
+                const auto known_ambiguity = ambiguity_block_ids.find(ambiguity_key);
+                if (known_ambiguity == ambiguity_block_ids.end())
+                    ambiguity_block_ids[ambiguity_key] = message.amb_index;
+                else if (known_ambiguity->second != message.amb_index)
+                    parameter_addresses_consistent = false;
             }
 
             RawObsIndex index;
@@ -4598,12 +5436,44 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
             _last_gnss_info = gnss_info;
             return;
         }
-        for (auto parameter : descriptor->second)
+        if (parameter_address == parameter_addresses.end() ||
+            parameter_address->second == nullptr)
         {
+            gnss_info->valid = false;
+            if (_last_gnss_info)
+                delete _last_gnss_info;
+            _last_gnss_info = gnss_info;
+            return;
+        }
+        const auto ambiguity_id = ambiguity_block_ids.find(address);
+        if (ambiguity_id != ambiguity_block_ids.end() && size != 1)
+        {
+            gnss_info->valid = false;
+            if (_last_gnss_info)
+                delete _last_gnss_info;
+            _last_gnss_info = gnss_info;
+            return;
+        }
+        for (int offset = 0; offset < size; ++offset)
+        {
+            t_gpar parameter = descriptor->second[static_cast<size_t>(offset)];
             parameter.index = _all_para_win.parNumber() + 1;
             _all_para_win.addParam(parameter);
+            _raw_posterior_scalar_addresses.push_back(parameter_address->second + offset);
+            _raw_posterior_scalar_ambiguity_ids.push_back(
+                ambiguity_id == ambiguity_block_ids.end() ? -1 : ambiguity_id->second);
         }
         column += size;
+    }
+
+    if (_raw_posterior_scalar_addresses.size() != _all_para_win.parNumber() ||
+        _raw_posterior_scalar_ambiguity_ids.size() != _all_para_win.parNumber())
+    {
+        gnss_info->valid = false;
+        if (_last_gnss_info)
+            delete _last_gnss_info;
+        _last_gnss_info = gnss_info;
+        return;
     }
 
     for (size_t row = 0; row < gnss_info->factors.size(); ++row)

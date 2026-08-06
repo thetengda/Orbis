@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <iostream>
+#include <vector>
 #include "gdata/gupd.h"
 #include "gset/gsetamb.h"
 #include "gset/gsetout.h"
@@ -31,6 +32,24 @@ using namespace gnut;
 
 namespace great
 {
+    /**
+     * Absolute two-parameter ambiguity equation accepted by the integer
+     * resolver. Parameter indices are 1-based and valid for the filter state
+     * passed to the immediately preceding processBatch() call.
+     */
+    struct LibGREAT_LIBRARY_EXPORT FixedAmbiguityConstraint
+    {
+        int parameter_index_a = -1;
+        int parameter_index_b = -1;
+        string satellite_a;
+        string satellite_b;
+        string ambiguity_type;
+        double coefficient_a = 0.0;
+        double coefficient_b = 0.0;
+        double target = 0.0;
+        double information = 0.0;
+    };
+
     /**
     * @brief class for storing ambiguity resolution common value.
     */
@@ -237,6 +256,12 @@ namespace great
         /** @brief ge Final Params. */
         t_gallpar &getFinalParams();
 
+        /** @brief Get the accepted NL equations used for the final solution. */
+        const vector<FixedAmbiguityConstraint> &fixedConstraints() const noexcept
+        {
+            return _fixed_constraints;
+        }
+
         /** @brief get DD. */
         t_DD_amb &getDD() { return _DD; } 
 
@@ -333,6 +358,8 @@ namespace great
         int _full_fix_num;                                        ///< full fix number
         int _max_active_amb_one_epo;                              ///< max active amb one epoch      
         int _total_amb_num, _fixed_amb_num;                       ///< total amb num
+        vector<FixedAmbiguityConstraint> _pending_fixed_constraints;
+        vector<FixedAmbiguityConstraint> _fixed_constraints;
 
     protected:
         /**
@@ -439,6 +466,7 @@ namespace great
         */
         bool _addFixConstraint(t_gflt *gflt);
         bool _addFixConstraintWL(t_gflt *gflt, string mode);
+        bool _validateFixedConstraints(t_gflt *gflt);
 
         /**
         * @brief init ratio-file.

@@ -434,6 +434,34 @@ namespace gfgomsf
         return true;
     }
 
+    bool t_gambRAW_manager::containsArc(int amb_id) const noexcept
+    {
+        const auto ambiguity_it = _ambiguity.find(amb_id);
+        return ambiguity_it != _ambiguity.end() && ambiguity_it->second != nullptr;
+    }
+
+    bool t_gambRAW_manager::getArcInfo(int amb_id, RawArcInfo &info) const
+    {
+        const auto ambiguity_it = _ambiguity.find(amb_id);
+        if (ambiguity_it == _ambiguity.end() || !ambiguity_it->second)
+            return false;
+
+        const auto &ambiguity = ambiguity_it->second;
+        const FREQ_SEQ frequency = ambiguity->getFB().first;
+        info.arc_id = amb_id;
+        info.sat_id = ambiguity->_sat_global_id;
+        info.start_node = ambiguity->_start_rover_count;
+        info.end_node = ambiguity->_rover_list.empty() ? -1 : ambiguity->endRover();
+        info.sat = ambiguity->_sat_prn;
+        info.stable_key = ambiguityKey(info.sat, frequency, amb_id);
+        info.freq = frequency;
+        info.beg = ambiguity->_beg;
+        info.end = ambiguity->_end;
+        const auto search = search_index.find(make_pair(info.sat_id, frequency));
+        info.current_search_arc = search != search_index.end() && search->second == amb_id;
+        return true;
+    }
+
     string t_gambRAW_manager::ambiguityKey(const string &sat, FREQ_SEQ freq, int arc)
     {
         ostringstream os;

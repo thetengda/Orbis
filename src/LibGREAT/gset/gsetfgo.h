@@ -26,6 +26,14 @@ using namespace gnut;
 
 namespace  gfgo
 {
+	/** Ambiguity-fixing feedback applied to the GNSS factor graph. */
+	enum class AMB_FEEDBACK_MODE
+	{
+		NONE,
+		PARAMETER,
+		CONSTRAINT
+	};
+
 	/**
 	* @brief	class for set fgo xml
 	*/
@@ -189,6 +197,12 @@ namespace  gfgo
 		* @return	double relative rotation transform variance
 		*/
 		double relative_rot_var();
+
+		/**
+		 * @brief Get ambiguity fixing feedback mode for the GNSS graph.
+		 * @return NONE (default), PARAMETER, or CONSTRAINT.
+		 */
+		AMB_FEEDBACK_MODE ambiguity_feedback_mode();
 
 	};
 
