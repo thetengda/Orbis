@@ -13,6 +13,12 @@ namespace gfgo
 
 	bool t_gprecisebiasFGO::cmb_equ(bool isFGO, bool calculate_equ, t_gtime &epoch, t_gallpar &params, t_gsatdata &obsdata, t_gobs &gobs, t_gbaseEquation &result)
 	{
+		// Serialize residual evaluation on the shared scratch state when the
+		// Ceres solve uses num_threads > 1.  The FGO factors call cmb_equ from
+		// parallel worker threads and _prepare_obs_GPP_FGO/_omc_obs_ALL/...
+		// mutate member buffers (_crt_obs, _crs_sat_crd, _crs_rec_crd, ...).
+		std::lock_guard<std::mutex> lock(_cmb_equ_mutex);
+
 		//cout << "call : cmb_equ" << endl;		
 		// check obs_type valid
 		double Obs_value = obsdata.getobs(gobs.gobs());

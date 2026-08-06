@@ -38,7 +38,8 @@ namespace gfgo
 		_gravity = dynamic_cast<t_gsetfgo*>(gset)->gravity();
 
 		_relative_pos_var = dynamic_cast<t_gsetfgo*>(gset)->relative_pos_var();
-		_relative_rot_var = dynamic_cast<t_gsetfgo*>(gset)->relative_rot_var();	
+		_relative_rot_var = dynamic_cast<t_gsetfgo*>(gset)->relative_rot_var();
+		_gnss_num_threads = dynamic_cast<t_gsetfgo*>(gset)->gnss_num_threads();
 
 		window_size = dynamic_cast<t_gsetfgo*>(gset)->window_size();
 		gwindow_size = dynamic_cast<t_gsetfgo*>(gset)->gwindow_size();

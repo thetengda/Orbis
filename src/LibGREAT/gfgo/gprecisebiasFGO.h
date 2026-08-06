@@ -21,6 +21,8 @@ History
 #include "gexport/ExportLibGREAT.h"
 #include "gmodels/gprecisebiasGPP.h"
 
+#include <mutex>
+
 namespace gfgo
 {
 	/**
@@ -77,6 +79,11 @@ namespace gfgo
 		* @return      bool             the prt mode
 		*/
 		bool _prt_obs_ALL(const t_gtime &crt_epo, t_gsatdata &obsdata, t_gallpar &pars, t_gobs &gobs, vector<pair<int, double>> &coeff);
+
+	private:
+		///< serializes cmb_equ so parallel Ceres residual evaluation does not
+		///< race on the shared scratch state (_crt_obs, _crs_sat_crd, ...)
+		std::mutex _cmb_equ_mutex;
 
 	};
 }

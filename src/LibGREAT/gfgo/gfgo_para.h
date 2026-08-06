@@ -54,7 +54,9 @@ namespace gfgo
 		Eigen::Vector3d _gravity;				///< gravity
 
 		double _relative_pos_var=0.1;			///< relative position variance
-		double _relative_rot_var=0.001;			///< relative rotation variance		
+		double _relative_rot_var=0.001;			///< relative rotation variance
+
+		int _gnss_num_threads=1;				///< worker threads for the GNSS Ceres solve		
 
 		int window_size = 3;
 		int gwindow_size = 3;

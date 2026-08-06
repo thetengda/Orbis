@@ -403,6 +403,24 @@ namespace gfgo
 		}
 	}
 
+	int t_gsetfgo::gnss_num_threads()
+	{
+		std::lock_guard<t_gmutex> lock(_gmutex);
+		string x = _doc.child(XMLKEY_ROOT).child(XMLKEY_FGO).child_value("gnss_num_threads");
+		str_erase(x);
+		int x_int = 0;
+		if (x != "")  x_int = std::stoi(x);
+
+		if (x_int <= 0)
+		{
+			return 1;	//default value: single-threaded residual evaluation
+		}
+		else
+		{
+			return x_int;
+		}
+	}
+
 	double t_gsetfgo::relative_pos_var()
 	{
 		_gmutex.lock();

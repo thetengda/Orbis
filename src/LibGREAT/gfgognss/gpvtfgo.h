@@ -368,6 +368,14 @@ namespace gfgomsf
 		int _optimization_PPP_RAW();
 		bool _solve_PPP_RAW_problem(ceres::Problem &problem,
 			ceres::Solver::Summary &summary) const;
+		/**
+		 * @brief Build Ceres solver options for a GNSS graph solve.
+		 *
+		 * Uses SPARSE_NORMAL_CHOLESKY when a sparse backend is available
+		 * (falling back to DENSE_QR) and honors the configured thread count for
+		 * both residual evaluation and the sparse linear-algebra factorization.
+		 */
+		ceres::Solver::Options _ceres_solver_options() const;
 		void _add_RAW_fixed_constraints(ceres::Problem &problem,
 			const std::set<int> &problem_ambiguities);
 		bool _write_RAW_fixed_solution(t_gallpar &fixed_parameters);

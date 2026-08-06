@@ -749,7 +749,7 @@ void gfgomsf::t_gpvtfgo::_prepare_equ()
 // for RTK
 bool gfgomsf::t_gpvtfgo::_update_all_equ()
 {
-	t_gprecisebiasFGO gbias_model = *_gbias_model;
+	t_gprecisebiasFGO &gbias_model = *_gbias_model;
 	for (int i = 0; i <= _rover_count; i++)//epoch loop
 	{
 		//sat-rec-band-all_obstype
@@ -2557,8 +2557,7 @@ int gfgomsf::t_gpvtfgo::_optimization()
 			problem.AddResidualBlock(initial_pos, NULL, _para_CRD[i]);
 		}
 		//ceres solver
-		ceres::Solver::Options options;
-		options.linear_solver_type = ceres::DENSE_QR;
+		ceres::Solver::Options options = _ceres_solver_options();
 		options.max_num_iterations = 10;
 		options.trust_region_strategy_type = ceres::DOGLEG;
 		ceres::Solver::Summary summary;
@@ -2598,11 +2597,32 @@ int gfgomsf::t_gpvtfgo::_optimization()
 	return 1;
 }
 
+ceres::Solver::Options gfgomsf::t_gpvtfgo::_ceres_solver_options() const
+{
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    if (!ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::SUITE_SPARSE) &&
+        !ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::CX_SPARSE) &&
+        !ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::EIGEN_SPARSE))
+    {
+        options.linear_solver_type = ceres::DENSE_QR;
+        if (_spdlog)
+            SPDLOG_LOGGER_WARN(_spdlog,
+                "SPARSE_NORMAL_CHOLESKY is not available in this Ceres build; the GNSS FGO graph will fall back to DENSE_QR");
+    }
+    const int threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
+    options.num_threads = threads;
+    // SuiteSparse/CXSparse use num_linear_solver_threads for the sparse
+    // factorization; keeping it in sync with num_threads lets a multi-core
+    // build parallelize the elimination without touching residual evaluation.
+    options.num_linear_solver_threads = threads;
+    return options;
+}
+
 bool gfgomsf::t_gpvtfgo::_solve_PPP_RAW_problem(
     ceres::Problem &problem, ceres::Solver::Summary &summary) const
 {
-    ceres::Solver::Options options;
-    options.linear_solver_type = ceres::DENSE_QR;
+    ceres::Solver::Options options = _ceres_solver_options();
     options.max_num_iterations = 10;
     options.trust_region_strategy_type = ceres::DOGLEG;
     ceres::Solve(options, &problem, &summary);
@@ -3185,6 +3205,21 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
     return true;
 }
 
+/**
+ * @brief Optimize the sliding-window RAW (undifferenced code+carrier) factor graph.
+ *
+ * Builds the current window's Ceres problem (one node per epoch: CRD/CLK/TRP and
+ * per-system ISB, per-(node,sat) slant ionosphere SION, per-arc RAW ambiguity),
+ * adds state priors/process factors and all code/phase measurement factors, then
+ * solves and re-runs outlier rejection until no further observation is dropped.
+ *
+ * Under AMB_FEEDBACK_MODE::CONSTRAINT the float posterior is snapshotted before
+ * the accepted fixed ambiguity equations are (re-)applied and the problem is
+ * re-solved; any failure rolls the whole graph back to the last valid float
+ * solution (see _apply_RAW_constraint_feedback for the transactional details).
+ *
+ * @return 1 on success (valid _last_gnss_info), -1 on failure (invalidates it).
+ */
 int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 {
     _reset_RAW_feedback_problem();
@@ -3194,9 +3229,12 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
     bool iter_flag = false;
     pair<string, int> outlier = make_pair(" ", -1);
 
+    // Rebuild and re-solve the window until outlier rejection converges
+    // (the last rejected observation is re-fed into _remove_outlier_sat).
     do
     {
         ++count;
+        // Drop the previous iteration's outlier from the observation set.
         if (!_remove_outlier_sat(outlier))
         {
             if (outlier.first != " " && _last_gnss_info)
@@ -3204,12 +3242,18 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
             return -1;
         }
 
+        // Copy the current parameter vectors into the double buffers that the
+        // factor graph reads, and create the problem with Huber loss for the
+        // code (_loss_function) and phase (_loss_function_cp) measurements.
         _vector_to_double();
         std::unique_ptr<ceres::Problem> problem_owner(new ceres::Problem());
         ceres::Problem &problem = *problem_owner;
         ceres::LossFunction *loss_function = new ceres::HuberLoss(_loss_func_value);
         ceres::LossFunction *loss_function_cp = new ceres::HuberLoss(_loss_func_value);
 
+        // --- Common epoch states: one block per window node. ---
+        // CRD(3)/CLK(1)/TRP(1) are always present; each system ISB is only
+        // added while that system is not lost for the node.
         for (int i = 0; i <= _rover_count; ++i)
         {
             problem.AddParameterBlock(_para_CRD[i], 3);
@@ -3225,6 +3269,10 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 				problem.AddParameterBlock(_para_ISB_QZS[i], 1);
         }
 
+        // --- SION and ambiguity parameter blocks. ---
+        // Collect the slant-ionosphere satellites actually observed at each node
+        // and the ambiguity arcs referenced by any phase observation; only these
+        // get parameter blocks (no unused SION/AMB state in the graph).
         vector<set<int>> node_sion(static_cast<size_t>(_rover_count + 1));
         set<int> raw_ambiguities;
         for (int i = 0; i <= _rover_count; ++i)
@@ -3245,8 +3293,13 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
         for (int amb_id : raw_ambiguities)
             problem.AddParameterBlock(_para_AMB_RAW[amb_id], 1);
 
+        // --- State priors and process factors. ---
+        // The marginalization prior from the previous window keeps the states
+        // that survive into this window tied to the earlier information.
         _prior_factor(problem);
 
+        // Slant ionosphere random walk: same satellite present at consecutive
+        // nodes is constrained with process noise Q from the ionosphere model.
         for (int i = 0; i < _rover_count; ++i)
         {
             const double graph_dt = std::fabs(_headers[i + 1] - _headers[i]);
@@ -3275,6 +3328,23 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 			}
         }
 
+        // Troposphere RW Factor (RAW), consistent with the TRP random walk
+        // carried by _marginalization_PPP_RAW so the optimization graph and
+        // the Schur prior model the same troposphere process.
+        for (int i = 0; i < _rover_count; ++i)
+        {
+            const double graph_dt = std::fabs(_headers[i + 1] - _headers[i]);
+            if (_trpStoModel && graph_dt > 0.0 && std::isfinite(graph_dt))
+            {
+                const double q = graph_interval_random_walk_q(_trpStoModel, graph_dt);
+                if (q > 0.0 && std::isfinite(q))
+                    problem.AddResidualBlock(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+                                             _para_TRP[i], _para_TRP[i + 1]);
+            }
+        }
+
+        // Inter-system bias random walk per system: node pairs [i-1]→[i] are
+        // constrained only while both endpoints keep the system (not lost).
         for (int i = 0; i <= _rover_count; ++i)
         {
             if (i == 0)
@@ -3294,6 +3364,8 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 									 _para_ISB_QZS[i - 1], _para_ISB_QZS[i]);
         }
 
+        // Per-node state initial priors (weak absolute references that keep every
+        // node observable; TRP uses the configured nominal value _trp_ini).
         for (int i = 0; i <= _rover_count; ++i)
         {
             problem.AddResidualBlock(new InitialFactor(_trp_ini, 1.0 / _sig_init_ztd), nullptr, _para_TRP[i]);
@@ -3308,6 +3380,8 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 			if (!_lost_isb_QZS[i])
 				problem.AddResidualBlock(new InitialFactor(0.0, 1.0 / _sig_init_qzs), nullptr, _para_ISB_QZS[i]);
         }
+        // Weak prior on each ambiguity arc's float start value from the
+        // RAW ambiguity manager (defines the estimable integer combination).
         for (int amb_id : raw_ambiguities)
         {
             problem.AddResidualBlock(new InitialGnssAMB(_ambRAW_manager->getInitialAmb(amb_id), 1.0 / _sigAmbig),
@@ -3321,6 +3395,12 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
             return -1;
         }
 
+        // --- GNSS measurement factors (code + carrier RAW). ---
+        // One factor per observation: within a system, GPS links
+        // CRD/CLK/TRP/SION while the other systems also link their ISB; a phase
+        // observation additionally links this arc's ambiguity block. Each node
+        // materializes a t_gallpar on the current parameter buffers so every
+        // factor sees the same linearization point.
         for (int i = 0; i <= _rover_count; ++i)
         {
             const t_gallpar params_temp(_para_window[i]);
@@ -3380,6 +3460,8 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
             }
         }
 
+        // Solve the current float window and build its posterior; expected-failure
+        // paths invalidate the shared posterior so callers fall back cleanly.
         ceres::Solver::Summary summary;
         if (!_solve_PPP_RAW_problem(problem, summary))
         {
@@ -3388,6 +3470,8 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
             return -1;
         }
 
+        // Posteriori test (per-observation residuals/variance) and outlier detection:
+        // if any observation is flagged, loop again with it dropped.
         _posteriori_test_PPP_RAW(problem);
         iter_flag = _gobs_outlier_detection(outlier) >= 0;
         if (!iter_flag && _last_gnss_info && _last_gnss_info->valid &&
@@ -3455,8 +3539,12 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 				_raw_prior_contains_fixed_information ||
 				!_raw_feedback_constraint_residuals.empty();
         }
+        // End of the rejection loop: this rebuilds and re-solves the window
+        // until _gobs_outlier_detection reports no further outlier to drop.
     } while (iter_flag);
 
+    // Finalize: require a valid posterior, commit the optimized buffers back
+    // to the window state, and log the solve time.
     if (!_last_gnss_info || !_last_gnss_info->valid)
         return -1;
     _double_to_vector();
@@ -3713,13 +3801,11 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP()
         // }
 
         //ceres solver
-        ceres::Solver::Options options;
-        options.linear_solver_type = ceres::DENSE_QR;
+        ceres::Solver::Options options = _ceres_solver_options();
         options.max_num_iterations = _max_num_iterations;
         //options.parameter_tolerance = 1.0e-10;  //default 1e-8
         options.max_solver_time_in_seconds = 1;
         //options.minimizer_progress_to_stdout = true;
-        //options.num_threads = 2; !!!can not be used, caused by newmat
         options.trust_region_strategy_type = ceres::DOGLEG;
         ceres::Solver::Summary summary;
         ceres::Solve(options, &problem, &summary);

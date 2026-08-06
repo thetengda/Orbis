@@ -187,6 +187,12 @@ namespace  gfgo
 		int max_num_iterations();
 
 		/**
+		* @brief  get number of worker threads for the GNSS Ceres solve.
+		* @return	int number of threads (<=0 means single-threaded)
+		*/
+		int gnss_num_threads();
+
+		/**
 		* @brief  get relative position transform variance.
 		* @return	double relative position transform variance
 		*/
