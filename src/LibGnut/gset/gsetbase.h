@@ -25,7 +25,7 @@
 
 #include "gutils/gtypeconv.h"
 #include "gutils/gmutex.h"
-#include "pugixml/src/pugixml.hpp"
+#include "pugixml.hpp"
 #include "spdlog/spdlog.h"
 //#include "gio/glog.h"
 

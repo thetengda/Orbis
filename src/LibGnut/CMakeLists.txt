@@ -1,5 +1,5 @@
-﻿#Minimum requirement of CMake version : 3.5
-cmake_minimum_required(VERSION 3.5)
+﻿#Minimum requirement of CMake version 
+cmake_minimum_required(VERSION 3.15)
 
 #Project name and version number
 project(${LibGnut} VERSION 0.1.0)
@@ -9,38 +9,18 @@ project(${LibGnut} VERSION 0.1.0)
 add_definitions(-D GREAT_LibGnut_LIBRARY)
 # ==========================================================================================================================================
 
-# link third party
-if(CMAKE_SYSTEM_NAME MATCHES "Windows")
-    #For windows
-    # ==============================================================================
-    if (NOT DEFINED Third_Eigen_ROOT)
-        find_path(Third_Eigen_ROOT       HINTS "${Third_Eigen_ROOT}"        "$ENV{Third_Eigen_ROOT}            ")
-    endif()
-
-    # ==============================================================================
-else()
-    # For linux
-    # write write_your_path_here
-    # ==============================================================================
-    if (NOT DEFINED Third_Eigen_ROOT)
-        set(Third_Eigen_ROOT       ${ROOT}/third-party/Eigen)
-    endif()
-
-    # ==============================================================================
-endif()
+# link third party (vcpkg-managed, see src/vcpkg.json)
+find_package(Eigen3 REQUIRED NO_MODULE)
+find_package(spdlog REQUIRED)
+find_package(pugixml REQUIRED)
 
 # set include path
-include_directories(${Third_Eigen_ROOT})
 include_directories(${LibGnutSrc})
 
-#message(STATUS "                                                                     ")
-message(STATUS " include path for ${LibGnut} is : ${Third_Eigen_ROOT}")
 message(STATUS " include path for ${LibGnut} is : ${LibGnutSrc}")
 #message(STATUS "                                                                     ")
 
 # for all the header files and source_files
-file(GLOB_RECURSE header_files ${PROJECT_SOURCE_DIR} *.h *.hpp)
-file(GLOB_RECURSE source_files ${PROJECT_SOURCE_DIR} *.cpp)
 file(GLOB_RECURSE header_files ${PROJECT_SOURCE_DIR} *.h *.hpp)
 file(GLOB_RECURSE source_files ${PROJECT_SOURCE_DIR} *.cpp)
 
@@ -99,6 +79,9 @@ else()
     link_directories(${BUILD_DIR}/Lib)
 endif()
 # ==========================================================================================================================================
+
+# link vcpkg-provided third-party targets (PUBLIC so consumers inherit the include paths)
+target_link_libraries(${PROJECT_NAME} PUBLIC Eigen3::Eigen spdlog::spdlog pugixml::pugixml)
 
 
 

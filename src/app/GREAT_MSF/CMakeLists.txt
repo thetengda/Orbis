@@ -12,8 +12,6 @@ source_group("Header Files" FILES header_files)
 source_group("Soruce Files" FILES source_files)
 
 set(include_path
-    ${Third_Eigen_ROOT}
-    ${Third_GLFW_ROOT}/include
     ${LibGnutSrc}
     ${LibGREATSrc})
     
@@ -42,6 +40,13 @@ set(lib_list
     ${LibGREAT})
     
 target_link_libraries(${PROJECT_NAME} ${lib_list})
+
+# Stage vcpkg runtime DLLs (ceres/glog/fmt/glfw/pugixml/spdlog) next to this EXE.
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_RUNTIME_DLLS:${PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+    COMMAND_EXPAND_LISTS)
 
 add_dependencies(${PROJECT_NAME} ${lib_list})
 

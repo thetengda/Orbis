@@ -1,5 +1,5 @@
-﻿#Minimum requirement of CMake version : 3.5
-cmake_minimum_required(VERSION 3.5)
+﻿#Minimum requirement of CMake version : 3.21 ($<TARGET_RUNTIME_DLLS> needs 3.21+)
+cmake_minimum_required(VERSION 3.21)
 
 #Project name and version number
 project(GREAT-PIFGO VERSION 0.1.0)
@@ -24,10 +24,9 @@ message(STATUS " It is written in standard C++. GREAT-FGO supports multi-frequen
 
 message(STATUS " ====================================================================================================================== ")
 
-# compiler setting
-include(CheckCXXCompilerFlag)
-CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
-CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
+# C++ standard: Ceres 2.x (vcpkg) requires C++17
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Compilation options settings
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
@@ -38,27 +37,23 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     add_compile_options(-lstdc++)
     add_compile_options(-Wall)
     add_compile_options(-w)
-    SET(BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}_Linux)
+    SET(BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR})
     SET(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE) 
     SET(CMAKE_INSTALL_RPATH "\${ORIGIN}/../Lib") 
 elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
-    SET(BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}_Darwin)
+    SET(BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR})
     add_compile_options(-pthread)
 elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
-    SET(BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}_Windows)
+    SET(BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR})
     add_compile_options(/bigobj)
     add_compile_options(/MP4)
     add_compile_options(/w)
-endif()
-
-if(COMPILER_SUPPORTS_CXX11)
-    set(CMAKE_CXX_STANDARD 11)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -pthread")
-elseif(COMPILER_SUPPORTS_CXX0X)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x -pthread")
-else()
-    message(STATUS "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
+    # G-Nut sources use `using namespace std;` together with <windows.h>,
+    # where the Windows SDK typedef's `byte`. Under C++17 std::byte collides
+    # with that typedef and breaks objidl.h/oaidl.h. Project code never uses
+    # std::byte (only fmt's opt-in std.h, which is not instantiated here), so
+    # disable it for MSVC.
+    add_compile_definitions(_HAS_STD_BYTE=0)
 endif()
 
 # Choose different compilation configurations according to VS compilation
@@ -105,36 +100,6 @@ set(PrintFile FALSE)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
-# link third party
-if(CMAKE_SYSTEM_NAME MATCHES "Windows")
-    #For windows
-    # ==============================================================================
-    if (NOT DEFINED Third_Eigen_ROOT)
-        find_path(Third_Eigen_ROOT       HINTS "${Third_Eigen_ROOT}"        "$ENV{Third_Eigen_ROOT}            ")
-    endif()
-
-    if (NOT DEFINED Third_GLFW_ROOT)
-        find_path(Third_GLFW_ROOT        HINTS "${Third_GLFW_ROOT}"         "$ENV{Third_GLFW_ROOT}         ")
-		
-	
-    endif()
-
-	
-    # ==============================================================================
-else()
-    # For linux
-    # write write_your_path_here
-    # ==============================================================================
-    if (NOT DEFINED Third_Eigen_ROOT)
-        set(Third_Eigen_ROOT       ${ROOT}/third-party/Eigen)
-    endif()
-
-    if (NOT DEFINED Third_GLFW_ROOT)
-        set(Third_GLFW_ROOT       ${ROOT}/third-party/GLFW)
-    endif()
-	
-    # ==============================================================================
-endif()
 
 # ========================================================================================================================================
 set(LibGnut          LibGnut)

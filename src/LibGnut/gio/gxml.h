@@ -29,7 +29,7 @@
 
 #include "gutils/gmutex.h"
 #include "gutils/gtypeconv.h"
-#include "pugixml/src/pugixml.hpp"
+#include "pugixml.hpp"
 
 using namespace std;
 using namespace pugi;

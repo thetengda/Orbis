@@ -13,12 +13,9 @@ source_group("Soruce Files" FILES source_files)
 
 
 set(include_path
-	${zlib_ROOT}
-	${Eigen_ROOT}
 	${LibGnutSrc}
     ${LibGREATSrc})
 include_directories(${include_path})
-include_directories(${GLFW_ROOT}/include/)
 
 add_executable(${PROJECT_NAME} ${header_files} ${source_files})
 
@@ -39,6 +36,13 @@ set(lib_list
 	${LibGnut}
     ${LibGREAT})
 target_link_libraries(${PROJECT_NAME} ${lib_list})
+
+# Stage vcpkg runtime DLLs (ceres/glog/fmt/glfw/pugixml/spdlog) next to this EXE.
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_RUNTIME_DLLS:${PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+    COMMAND_EXPAND_LISTS)
 
 add_dependencies(${PROJECT_NAME} ${lib_list})
 

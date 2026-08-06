@@ -1,3 +1,10 @@
 # CMake/build outputs
 /build/
 /build_Windows/
+build_vcpkg/
+
+sample_data/
+
+doc/**.md
+
+vcpkg_installed/

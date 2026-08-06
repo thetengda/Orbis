@@ -94,7 +94,7 @@ namespace gnut
 		case IFMT::EOP_INP:
 			return "EOP";
         default:
-            spdlog::critical("No fmt for {}, check your inp.", f);
+            spdlog::critical("No fmt for {}, check your inp.", static_cast<int>(f));
             throw logic_error("check your inp");
         }
     }
