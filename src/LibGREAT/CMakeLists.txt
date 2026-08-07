@@ -94,11 +94,6 @@ set(msf       GREAT_MSF)
 add_subdirectory(${ROOT}/app/${msf}   ${BUILD_DIR}/${msf})
 SET_PROPERTY(TARGET ${msf}    PROPERTY FOLDER "app")
 
-set(pvtfgo       GREAT_PVTFGO)
-add_subdirectory(${ROOT}/app/${pvtfgo}   ${BUILD_DIR}/${pvtfgo})
-SET_PROPERTY(TARGET ${pvtfgo}    PROPERTY FOLDER "app")
-
-
 set(gins       GREAT_GINSFGO)
 add_subdirectory(${ROOT}/app/${gins}   ${BUILD_DIR}/${gins})
 SET_PROPERTY(TARGET ${gins}    PROPERTY FOLDER "app")

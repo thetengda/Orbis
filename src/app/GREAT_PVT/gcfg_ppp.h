@@ -1,11 +1,21 @@
-
 #ifndef GCFG_PPP_H
 #define GCFG_PPP_H
+
+/**
+ * @file         gcfg_ppp.h
+ * @author       GREAT-WHU (https://github.com/GREAT-WHU)
+ * @brief        control set from XML for main
+ * @version      1.0
+ * @date         2025-11-04
+ *
+ * @copyright Copyright (c) 2025, Wuhan University. All rights reserved.
+ *
+ */
 
 #include <string>
 #include <iostream>
 #include <signal.h>
-
+#include "gfgognss/gpvtfgo.h"
 #include "gall/gallprec.h"
 #include "gall/gallpcv.h"
 #include "gall/gallobs.h"
@@ -13,8 +23,6 @@
 #include "gall/gallbias.h"
 #include "gproc/gpppflt.h"
 #include "gproc/gpreproc.h"
-#include "gio/gio.h"
-#include "spdlog/spdlog.h"
 #include "gio/gfile.h"
 #include "gutils/gtime.h"
 #include "gutils/gtypeconv.h"
@@ -30,6 +38,7 @@
 #include "gcoders/blq.h"
 #include "gmodels/gpcv.h"
 #include "gmodels/gbancroft.h"
+
 #include "gset/gsetgen.h"
 #include "gset/gsetinp.h"
 #include "gset/gsetout.h"
@@ -37,10 +46,12 @@
 #include "gset/gsetgnss.h"
 #include "gset/gsetflt.h"
 #include "gset/gsetrec.h"
+
 #include "gproc/gpvtflt.h"
 #include "gio/gfile.h"
 #include "gdata/gifcb.h"
 #include "gcoders/upd.h"
+
 #include "gcoders/sp3.h"
 #include "gcoders/rinexo.h"
 #include "gcoders/rinexn.h"
@@ -54,13 +65,24 @@
 #include "gcoders/biabernese.h"
 #include "gcoders/atx.h"
 #include "gdata/gnavde.h"
+#include "gset/gsetfgo.h"
+#include "gset/gsetsensors.h"
 
 using namespace std;
 using namespace pugi;
+using namespace gfgo;
+using namespace gfgomsf;
 
 namespace gnut
 {
 
+  /**
+   * @brief unified PPP/RTK configuration class.
+   *
+   * Inherits every settable module used by both the classical Kalman-filter
+   * PPP (FLT) and the factor-graph PPP (FGO).  Which engine runs is selected
+   * by <gen>/<est> == "FGO" | "FLT" (see t_gsetgen::estimator()).
+   */
   class t_gcfg_ppp : public t_gsetgen,
                      public t_gsetinp,
                      public t_gsetout,
@@ -68,21 +90,16 @@ namespace gnut
                      public t_gsetproc,
                      public t_gsetflt,
                      public t_gsetrec,
-                     public t_gsetamb
-                     //public t_gsetturboedit
+                     public t_gsetamb,
+                     public t_gsetfgo,
+                     public t_gset_gomsf_sensors
   {
 
   public:
-      /** @brief default constructor. */
     t_gcfg_ppp();
-
-    /** @brief default destructor. */
     ~t_gcfg_ppp();
 
-    /** @brief settings check. */
     void check(); // settings check
-
-    /** @brief settings help. */
     void help();  // settings help
 
   protected:

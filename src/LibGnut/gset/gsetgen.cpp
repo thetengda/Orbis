@@ -224,16 +224,15 @@ namespace gnut
         set<string> src = t_gsetbase::_setval(XMLKEY_GEN, "est");
         _gmutex.unlock();
 
-        if (src.empty() || *src.begin() != "FLT") 
+        // <gen>/<est> selects the estimation engine: "FGO" for factor-graph
+        // optimization, everything else (or absent) defaults to "FLT", the
+        // classical Kalman filter.  Values are normalized to upper case by
+        // _setval().
+        if (src.find("FGO") != src.end())
         {
-            string tmp("FLT");
-            return tmp;
+            return string("FGO");
         }
-        else
-        {
-
-            return *src.begin();
-        }
+        return string("FLT");
     }
 
     set<string> t_gsetgen::sat_rm()
