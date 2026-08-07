@@ -42,6 +42,16 @@ namespace gnut
         _level = log_level;
         _pattern = string(DEF_FORMAT_LOG);
 
+        // With a shared spdlog registry (SPDLOG_SHARED_LIB), logger names are
+        // process-global. Fall back to a unique name if the configured log_name
+        // is already registered by the app or another site.
+        {
+            std::string base = _name;
+            int i = 1;
+            while (spdlog::get(_name))
+                _name = base + "." + std::to_string(i++);
+        }
+
         // Creat and set the log file : clk.log
         spdlog::set_level(_level);
         spdlog::set_pattern(_pattern);
@@ -102,6 +112,14 @@ namespace gnut
         _name = log_name;
         _level = log_level;
         _pattern = string(DEF_FORMAT_LOG);
+
+        // Shared spdlog registry: pick a unique name if already registered.
+        {
+            std::string base = _name;
+            int i = 1;
+            while (spdlog::get(_name))
+                _name = base + "." + std::to_string(i++);
+        }
 
         // Creat and set the log file : clk.log
         spdlog::set_level(_level);

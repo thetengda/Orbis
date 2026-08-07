@@ -1703,14 +1703,20 @@ int great::t_gpvtflt::_amb_resolution()
         _prtOut(_epoch, _param_fixed, Qx_tmp, _data, os, line, true);
     }
 
-    // Print flt results
-    if (_flt)
-    {
-        _flt->write(os.str().c_str(), os.str().size());
-        _flt->flush();
-    }
+    // Print the fixed (AR) result through the virtual output hook, so derived
+    // solvers (FGO) can route it to their own AR file instead of <flt>.
+    _output_amb_fixed(os.str());
 
     return 1;
+}
+
+void great::t_gpvtflt::_output_amb_fixed(const std::string &content)
+{
+    if (_flt)
+    {
+        _flt->write(content.c_str(), content.size());
+        _flt->flush();
+    }
 }
 
 
@@ -3144,12 +3150,9 @@ void great::t_gpvtflt::_prtOutHeader()
     os << setw(8) << " ";
     os << endl;
 
-    // Print flt results
-    if (_flt)
-    {
-        _flt->write(os.str().c_str(), os.str().size());
-        _flt->flush();
-    }
+    // Print the fixed-solution header through the virtual output hook, so
+    // derived solvers (FGO) can write it to their own AR file instead of <flt>.
+    _output_amb_fixed(os.str());
 }
 
 void great::t_gpvtflt::_generateObsIndex(t_gfltEquationMatrix &equ)

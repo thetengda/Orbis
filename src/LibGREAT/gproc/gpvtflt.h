@@ -235,6 +235,17 @@ namespace great
         virtual void _prtOut(t_gtime &epo, t_gallpar &X, const SymmetricMatrix &Q, vector<t_gsatdata> &data, ostringstream &os, xml_node &node, bool saveProd = true);
 
 
+        /**
+        * @brief output the ambiguity-fixed (AR) solution.
+        * @details Base implementation writes the fixed solution to the <flt>
+        *          output stream (_flt). Derived solvers (e.g. FGO) override this
+        *          to route the fixed solution to their own AR output, so that the
+        *          ambiguity-fixed file is kept distinct from the filter output.
+        * @param[in] content  already-formatted fixed-solution rows
+        */
+        virtual void _output_amb_fixed(const std::string &content);
+
+
         
 
         /** @brief print  the result. */

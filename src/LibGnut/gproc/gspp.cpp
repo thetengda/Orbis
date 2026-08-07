@@ -307,7 +307,7 @@ namespace gnut
             {
                 beg = t_gtime::current_time(t_gtime::GPS);
             } // real-time model
-            
+
             substitute(tmp, "$(rec)", _site, false);
             substitute(tmp, "$(doy)", int2str(beg.doy()), false);
             substitute(tmp, "$(date)", int2str(beg.year()) + int2str(beg.doy()), false); // add for date

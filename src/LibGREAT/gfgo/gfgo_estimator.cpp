@@ -18,8 +18,8 @@ namespace gfgo
 	t_gfgo::t_gfgo(t_gsetbase * set):
 	t_gfgo_para(set)
 	{
-		clear_state();			
-	
+		clear_state();
+
 
 	}
 

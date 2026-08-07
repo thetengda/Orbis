@@ -46,6 +46,10 @@ namespace gnut
             return INS_OUT;
         if (tmp == "FGO")
             return FGO_OUT;
+        if (tmp == "FGO_AR")
+            return FGO_AR_OUT;
+        if (tmp == "RATIO")
+            return RATIO_OUT;
         return OFMT(-1);
     }
 
@@ -63,6 +67,10 @@ namespace gnut
             return "FLT";
         case FGO_OUT:
             return "FGO";
+        case FGO_AR_OUT:
+            return "FGO_AR";
+        case RATIO_OUT:
+            return "RATIO";
         default:
             return "UNDEF";
         }

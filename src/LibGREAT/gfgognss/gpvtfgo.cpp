@@ -191,6 +191,26 @@ t_gfgo_para(gset) {
 	}
 	if (o_path.empty() && _spdlog)
 		_spdlog->warn("PPP FGO output <fgo> is not configured; solution stream is disabled");
+
+	// Ambiguity-fixed (AR) solution stream, kept distinct from the filter <flt>
+	// output. Rows are written by the virtual _output_amb_fixed() hook.
+	string ar_path;
+	if (auto output = dynamic_cast<t_gsetout *>(gset))
+	{
+		ar_path = output->outputs("fgo_ar");
+		if (!ar_path.empty())
+		{
+			substitute(ar_path, "$(rec)", _site, false);
+			if (ar_path.compare(0, string(GFILE_PREFIX).size(), GFILE_PREFIX) == 0)
+				ar_path.erase(0, string(GFILE_PREFIX).size());
+			make_path(ar_path);
+			_output_ar_solution.open(
+				ar_path,
+				output->append() ? (ofstream::out | ofstream::app) : ofstream::out);
+		}
+	}
+	if (ar_path.empty() && _spdlog)
+		_spdlog->warn("PPP FGO ambiguity-fixed output <fgo_ar> is not configured; AR stream is disabled");
 	if (_output_float_solution.good()) {
 		_output_float_solution << "#FACTOR GRAPH OPTIMIZATION BASED GNSS SOLUTION" << endl;
 		//_output_float_solution << "#" << "ambiguity propogation: " << dynamic_cast<t_gsetfgo*>(gset)->_amb_propagation() << endl;
@@ -726,6 +746,21 @@ void gfgomsf::t_gpvtfgo::publish_foat()
         << fixed << setprecision(2)
         << " " << setw(8) << amb
         << endl;
+}
+
+void gfgomsf::t_gpvtfgo::_output_amb_fixed(const std::string &content)
+{
+    if (_output_ar_solution.good())
+    {
+        _output_ar_solution.write(content.c_str(), content.size());
+        _output_ar_solution.flush();
+    }
+    else
+    {
+        // Legacy fallback: configurations not yet migrated to <fgo_ar> keep
+        // writing the fixed solution to the base <flt> output.
+        t_gpvtflt::_output_amb_fixed(content);
+    }
 }
 
 // only use for RTK

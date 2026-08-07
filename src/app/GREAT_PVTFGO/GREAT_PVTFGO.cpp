@@ -314,7 +314,7 @@ int main(int argc, char** argv)
 		//glog.verb(dynamic_cast<t_gsetout*>(&gset)->verb());
 
 		runepoch = t_gtime::current_time(t_gtime::GPS);
-		
+
 		vgpvt[idx]->processBatch(beg, end, true);
 		lstepoch = t_gtime::current_time(t_gtime::GPS);
 

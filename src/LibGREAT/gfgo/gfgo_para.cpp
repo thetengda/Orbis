@@ -16,7 +16,7 @@ namespace gfgo
 
 	t_gfgo_para::t_gfgo_para(gnut::t_gsetbase * gset)
 	{
-		_num_of_cam = dynamic_cast<t_gsetfgo*>(gset)->num_of_cam();		
+		_num_of_cam = dynamic_cast<t_gsetfgo*>(gset)->num_of_cam();
 		_imu_enable = dynamic_cast<t_gsetfgo*>(gset)->imu_enable();
 		_lidar_enable = dynamic_cast<t_gsetfgo*>(gset)->lidar_enable();
 		_gnss_enable = dynamic_cast<t_gsetfgo*>(gset)->gnss_enable();

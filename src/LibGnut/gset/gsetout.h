@@ -50,8 +50,9 @@ namespace gnut
         FLT_OUT,
         KML_OUT,
         INS_OUT,
-        FGO_OUT
-		
+        FGO_OUT,
+        FGO_AR_OUT,
+        RATIO_OUT
 
     };
 

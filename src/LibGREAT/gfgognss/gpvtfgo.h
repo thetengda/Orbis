@@ -78,6 +78,9 @@ namespace gfgomsf
 		*/
 		void clearWindow();
 		virtual void publish_foat();
+
+		/** @brief route the ambiguity-fixed (AR) solution to <fgo_ar> instead of <flt>. */
+		virtual void _output_amb_fixed(const std::string &content) override;
 		
 	protected:
 		using RAWEquMsg = gfgo::RAWEquMsg;
@@ -215,6 +218,7 @@ namespace gfgomsf
 
 		ofstream _output_float_solution;//add for MultiWindow
 		ofstream _output_estimator_info;//add for MultiWindow
+		ofstream _output_ar_solution;//add for fgo ambiguity-resolved solution (separate from <flt>)
 
 		///< velocity of rover
 		double          _headers[GWINDOW_SIZE + 1];						    ///< header info of rover	
