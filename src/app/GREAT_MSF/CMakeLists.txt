@@ -1,5 +1,5 @@
-﻿#Minimum requirement of CMake version : 3.5
-cmake_minimum_required(VERSION 3.5)
+﻿#Minimum requirement of CMake version 
+cmake_minimum_required(VERSION 3.15)
 
 #Project name and version number
 project(${msf})

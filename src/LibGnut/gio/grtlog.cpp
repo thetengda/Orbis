@@ -132,15 +132,15 @@ namespace gnut
         }
         else if (_type.find("ROTATING") != string::npos)
         {
-            _spdlog = spdlog::rotating_logger_mt(_name, _name + ".spd_log", 1024 * 1024, 10);
+            _spdlog = spdlog::rotating_logger_mt(_name, _name, 1024 * 1024, 10);
         }
         else if (_type.find("BASIC") != string::npos)
         {
-            _spdlog = spdlog::basic_logger_mt(_name, _name + ".spd_log");
+            _spdlog = spdlog::basic_logger_mt(_name, _name);
         }
         else if (_type.find("DAILY") != string::npos)
         {
-            _spdlog = spdlog::daily_logger_mt(_name, _name + ".spd_log", 0, 0);
+            _spdlog = spdlog::daily_logger_mt(_name, _name, 0, 0);
         }
         else
         {

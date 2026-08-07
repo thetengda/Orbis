@@ -323,7 +323,9 @@ int gfgomsf::t_gpvtfgo::processBatch(const t_gtime &beg_r, const t_gtime &end_r,
 
 	t_gtime now(_beg_time);
 
-	std::cerr << _site << ": Start GNSS Processing: " << now.str_ymdhms() << " " << _end_time.str_ymdhms() << endl;
+	std::cerr << "\n" 
+		<< _site << ": Start GNSS Processing: " << now.str_ymdhms() 
+		<< " to " << _end_time.str_ymdhms() << endl;
 
 	bool time_loop = true;
 	while (time_loop)
@@ -366,14 +368,19 @@ int gfgomsf::t_gpvtfgo::processBatch(const t_gtime &beg_r, const t_gtime &end_r,
 		else
 			_success = true;
 
-		if (_spdlog) SPDLOG_LOGGER_ERROR(_spdlog, string("t_gpvtfgo ") ,_site + now.str_ymdhms(" processing epoch: "));
+		if (_spdlog) 
+			SPDLOG_LOGGER_INFO(_spdlog, 
+				string("t_gpvtfgo ") + _site + now.str_ymdhms(" processing epoch: ")
+			);
 		double percent = now.diff(_beg_time) / _end_time.diff(_beg_time) * 100.0;
 		const bool reported_fixed =
 			(!_isBase && _observ == OBSCOMBIN::RAW_ALL &&
 			 _ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE)
 				? _graph_ambiguity_fixed
 				: _amb_state;
-		std::cerr << "\r" << now.str_ymdhms() << setw(5) << " Q = " << (reported_fixed ? 1 : 2) << fixed << setprecision(1) << setw(6) << percent << "%";
+		std::cerr << "\r" << now.str_ymdhms() 
+			<< setw(5) << " Q = " << (reported_fixed ? 1 : 2) << fixed 
+			<< setprecision(1) << setw(6) << percent << "%";
 
 		if (_sampling > 1)
 			now.add_secs(int(sign * _sampling)); // =<1Hz data
@@ -2636,13 +2643,19 @@ ceres::Solver::Options gfgomsf::t_gpvtfgo::_ceres_solver_options() const
 {
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
-    if (!ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::SUITE_SPARSE) &&
-        !ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::EIGEN_SPARSE))
+    // Sparse factorization library preference: SuiteSparse (UMFPACK) first,
+    // Eigen's built-in sparse solver as fallback, then a dense solve when the
+    // Ceres build has neither (vcpkg features ceres[suitesparse,eigensparse]).
+    if (ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::SUITE_SPARSE))
+        options.sparse_linear_algebra_library_type = ceres::SUITE_SPARSE;
+    else if (ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::EIGEN_SPARSE))
+        options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+    else
     {
         options.linear_solver_type = ceres::DENSE_QR;
         if (_spdlog)
             SPDLOG_LOGGER_WARN(_spdlog,
-                "SPARSE_NORMAL_CHOLESKY is not available in this Ceres build; the GNSS FGO graph will fall back to DENSE_QR");
+                "No sparse linear algebra library in this Ceres build; the GNSS FGO graph will fall back to DENSE_QR");
     }
     const int threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
     options.num_threads = threads;

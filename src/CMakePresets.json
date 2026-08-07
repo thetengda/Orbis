@@ -3,21 +3,26 @@
   "configurePresets": [
     {
       "name": "windows-x64-vcpkg",
-      "displayName": "Windows x64 (Visual Studio 2026 + vcpkg)",
+      "displayName": "Windows x64",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/../build",
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "CMAKE_CONFIGURATION_TYPES": "Debug;Release;MinSizeRel;RelWithDebInfo"
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
       }
     }
   ],
   "buildPresets": [
     {
-      "name": "windows-x64-vcpkg",
+      "name": "release",
       "configurePreset": "windows-x64-vcpkg",
-      "configuration": "RelWithDebInfo"
+      "configuration": "Release"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "windows-x64-vcpkg",
+      "configuration": "Debug"
     }
   ]
 }

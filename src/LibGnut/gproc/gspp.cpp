@@ -11,6 +11,7 @@
 #include "gmodels/gsppmodel.h"
 #include "spdlog/spdlog.h"
 #include "gio/grtlog.h"
+#include "gutils/gfileconv.h"
 
 using namespace spdlog;
 namespace gnut
@@ -296,11 +297,13 @@ namespace gnut
 
     void t_gspp::_setLog(string mode)
     {
-        string tmp(dynamic_cast<t_gsetout *>(_set)->outputs("ppp"));
-        if (!tmp.empty())
+        // Per-site PPP log.  The <ppp> output is a $(rec)-expanded path, e.g.
+        // .\result\$(rec)-PPP_...ppp.log, so every receiver gets its own file.
+        // Falls back to the <log> name when <ppp> is not configured.
+        string log_name(dynamic_cast<t_gsetout *>(_set)->outputs("ppp"));
+        if (!log_name.empty())
         {
-            tmp = tmp.substr(7, tmp.size() - 7);
-            substitute(tmp, "$(rec)", _site, false);
+            substitute(log_name, "$(rec)", _site, false);
 
             t_gtime beg = dynamic_cast<t_gsetgen *>(_set)->beg();
             if (beg == FIRST_TIME)
@@ -308,16 +311,27 @@ namespace gnut
                 beg = t_gtime::current_time(t_gtime::GPS);
             } // real-time model
 
-            substitute(tmp, "$(rec)", _site, false);
-            substitute(tmp, "$(doy)", int2str(beg.doy()), false);
-            substitute(tmp, "$(date)", int2str(beg.year()) + int2str(beg.doy()), false); // add for date
+            substitute(log_name, "$(doy)", int2str(beg.doy()), false);
+            substitute(log_name, "$(date)", int2str(beg.year()) + int2str(beg.doy()), false); // add for date
             if (mode != "")
-                tmp = tmp + "-" + mode;
+                log_name = log_name + "-" + mode;
 
+            // outputs() names carry a file:// prefix that spdlog cannot open
+            // (it treats the resulting URI as invalid). Strip it, then create
+            // only the parent directory -- passing the whole file path to
+            // make_path() turns the multi-dot basename into a directory name.
+            substitute(log_name, GFILE_PREFIX, "");
+            string dir = log_name.substr(0, log_name.find_last_of("/\\"));
+            if (!dir.empty())
+                make_path(dir);
         }
-        auto log_type = dynamic_cast<t_gsetout*>(_set)->log_type();
+        else
+        {
+            log_name = dynamic_cast<t_gsetout*>(_set)->log_name();
+        }
+
+        auto log_type  = dynamic_cast<t_gsetout*>(_set)->log_type();
         auto log_level = dynamic_cast<t_gsetout*>(_set)->log_level();
-        auto log_name = dynamic_cast<t_gsetout*>(_set)->log_name();
         _grtlog.set_log(log_type, log_level, log_name);
         _spdlog = _grtlog.spdlog();
     }
