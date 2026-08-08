@@ -4,7 +4,9 @@
 #include "gfactor/raw_equation.h"
 #include "gfgo/gprecisebiasFGO.h"
 
+#include <array>
 #include <cmath>
+#include <mutex>
 
 namespace gfgo
 {
@@ -23,6 +25,14 @@ namespace raw_factor_detail
         double amb_coefficient = 0.0;
         double residual = 0.0;
         double sqrt_info = 0.0;
+    };
+
+    struct RawEvaluationCache
+    {
+        std::mutex mutex;
+        bool valid = false;
+        std::array<double, 8> state{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+        RawLinearization linearization;
     };
 
     inline par_type isbType(GSYS system)
@@ -61,7 +71,7 @@ namespace raw_factor_detail
     }
 
     inline bool linearize(const RAWEquMsg &message,
-                          const t_gallpar &base_params,
+                          t_gallpar &params,
                           t_gprecisebiasFGO *bias_model,
                           const double crd[3],
                           double clk,
@@ -86,7 +96,6 @@ namespace raw_factor_detail
         out.isb = isb;
         out.amb = amb;
 
-        t_gallpar params = base_params;
         const string site = message.site.empty() ? message.satdata.site() : message.site;
         const string sat = message.sat_id.empty() ? message.satdata.sat() : message.sat_id;
 
@@ -107,7 +116,7 @@ namespace raw_factor_detail
         t_gobs gobs(message.obs);
         t_gbaseEquation equation;
         t_gtime epoch = message.time;
-        if (!bias_model->cmb_equ(false, true, epoch, params, obsdata, gobs, equation) ||
+        if (!bias_model->cmb_equ(false, true, epoch, params, obsdata, gobs, equation, true) ||
             equation.B.empty() || equation.P.empty() || equation.l.empty() ||
             equation.P.front() <= 0.0)
         {
@@ -160,6 +169,45 @@ namespace raw_factor_detail
         }
         out.sqrt_info = sqrt(equation.P.front());
         return std::isfinite(out.sqrt_info) && out.sqrt_info > 0.0;
+    }
+
+    inline bool linearizeCached(const RAWEquMsg &message,
+                                t_gallpar &params,
+                                t_gprecisebiasFGO *bias_model,
+                                const double crd[3],
+                                double clk,
+                                double trp,
+                                double sion,
+                                double isb,
+                                double amb,
+                                bool use_isb,
+                                bool use_amb,
+                                RawEvaluationCache &cache,
+                                RawLinearization &out)
+    {
+        const std::array<double, 8> state{{crd[0], crd[1], crd[2], clk, trp,
+                                           sion, use_isb ? isb : 0.0,
+                                           use_amb ? amb : 0.0}};
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        if (cache.valid && cache.state == state)
+        {
+            out = cache.linearization;
+            return true;
+        }
+
+        RawLinearization linearization;
+        if (!linearize(message, params, bias_model, crd, clk, trp, sion,
+                       isb, amb, use_isb, use_amb, linearization))
+        {
+            cache.valid = false;
+            return false;
+        }
+
+        cache.state = state;
+        cache.linearization = linearization;
+        cache.valid = true;
+        out = linearization;
+        return true;
     }
 }
 }

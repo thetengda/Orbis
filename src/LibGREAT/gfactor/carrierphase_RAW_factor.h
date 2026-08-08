@@ -2,8 +2,7 @@
 #define L_RAW_FACTOR_H
 
 #include "gfgo/gutility.h"
-#include "gfactor/raw_equation.h"
-#include "gfgo/gprecisebiasFGO.h"
+#include "gfactor/raw_factor_common.h"
 
 using namespace great;
 using namespace gnut;
@@ -18,8 +17,9 @@ namespace gfgo
 
     private:
         RAWEquMsg _message;
-        t_gallpar _params;
+        mutable t_gallpar _params;
         t_gprecisebiasFGO *_bias_model = nullptr;
+        mutable raw_factor_detail::RawEvaluationCache _cache;
     };
 
     class LibGREAT_LIBRARY_EXPORT MultiCarrierphaseRAWFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1, 1, 1>
@@ -30,8 +30,9 @@ namespace gfgo
 
     private:
         RAWEquMsg _message;
-        t_gallpar _params;
+        mutable t_gallpar _params;
         t_gprecisebiasFGO *_bias_model = nullptr;
+        mutable raw_factor_detail::RawEvaluationCache _cache;
     };
 }
 

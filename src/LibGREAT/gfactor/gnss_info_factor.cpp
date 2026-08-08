@@ -82,7 +82,8 @@ gfgo::GNSSInfo::~GNSSInfo()
 
 		delete[] factors[i]->raw_jacobians;
 
-		delete factors[i]->cost_function;
+		if (factors[i]->owns_cost_function)
+			delete factors[i]->cost_function;
 
 		delete factors[i];
 	}
@@ -413,26 +414,31 @@ void gfgo::GNSSInfo::constructEqu_fromCeres(Eigen::MatrixXd variance)
 	// if (Qx(0, 0) == 0)
 	// 	Qx = Qx_inverse.inverse();
 	Qx0 = Eigen::MatrixXd::Identity(linearized_jacobians.cols(), linearized_jacobians.cols()) * 1;
-	Eigen::MatrixXd Qx_inverse = Qx0.inverse() + linearized_jacobians.transpose() * linearized_jacobians;
-
-	if (variance.rows() == linearized_jacobians.cols() &&
+	const bool has_ceres_covariance =
+		variance.rows() == linearized_jacobians.cols() &&
 		variance.cols() == linearized_jacobians.cols() &&
-		variance(0, 0) != 0)
+		variance.size() > 0 && variance(0, 0) != 0 && variance.allFinite();
+	if (has_ceres_covariance)
 	{
 		Qx = variance;
 	}
 	else
 	{
-		Qx = Qx_inverse.inverse();
+		Eigen::MatrixXd information = linearized_jacobians.transpose() * linearized_jacobians;
+		information.diagonal().array() += 1.0;
+		Qx = information.inverse();
 	}
 	//std::cout.precision(15);
 	//cout << "Qx: " << endl;
 	//std::cout << Qx << std::endl;
 	// normalized post-fit residuals
-	Eigen::MatrixXd Qv = linearized_jacobians * Qx * linearized_jacobians.transpose() + weight;
-
-	//add for debug hwzhang
-	postfit_qv_diag = Qv.diagonal();
+	// Only diag(J Qx J^T + I) is consumed below.  Forming the full dense
+	// observation covariance is quadratic in the number of observations and
+	// wastes both time and memory for RAW graphs.
+	const Eigen::MatrixXd jqx = linearized_jacobians * Qx;
+	postfit_qv_diag =
+		(jqx.cwiseProduct(linearized_jacobians)).rowwise().sum();
+	postfit_qv_diag.array() += 1.0;
 	postfit_nobs = linearized_residuals.rows();
 	postfit_npar = linearized_jacobians.cols();
 	postfit_dof_raw = postfit_nobs - postfit_npar;
@@ -440,7 +446,7 @@ void gfgo::GNSSInfo::constructEqu_fromCeres(Eigen::MatrixXd variance)
 	v_norm.resize(linearized_residuals.rows());
 	for (int i = 0; i < v_norm.rows(); i++)
 	{
-		v_norm(i) = sqrt(1.0 / Qv(i, i)) * linearized_residuals(i);
+		v_norm(i) = sqrt(1.0 / postfit_qv_diag(i)) * linearized_residuals(i);
 	}
 	int freedom = linearized_jacobians.rows() - linearized_jacobians.cols();
 	if (freedom < 1)

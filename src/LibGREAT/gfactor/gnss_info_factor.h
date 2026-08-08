@@ -38,6 +38,7 @@ namespace gfgo
 		void Evaluate();
 		ceres::CostFunction *cost_function;
 		ceres::LossFunction *loss_function;
+		bool owns_cost_function = true;
 		std::vector<double *> parameter_blocks;
 		std::vector<int> drop_set;
 		double **raw_jacobians = nullptr;

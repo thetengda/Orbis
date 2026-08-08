@@ -55,7 +55,13 @@ namespace gfgo
 		* @param[in]  result          the EQU result
 		* @return      bool              combine EQU mode
 		*/
-		bool cmb_equ(bool isFGO, bool calculate_equ, t_gtime &epoch, t_gallpar &params, t_gsatdata &obsdata, t_gobs &gobs, t_gbaseEquation &result);
+		bool cmb_equ(bool isFGO, bool calculate_equ, t_gtime &epoch, t_gallpar &params,
+		             t_gsatdata &obsdata, t_gobs &gobs, t_gbaseEquation &result);
+
+		/** @brief combine EQU and optionally bypass the legacy site/satellite/epoch cache. */
+		bool cmb_equ(bool isFGO, bool calculate_equ, t_gtime &epoch, t_gallpar &params,
+		             t_gsatdata &obsdata, t_gobs &gobs, t_gbaseEquation &result,
+		             bool force_refresh);
 
 		/**
 		* @brief prepare observation for GPP.(FGO)

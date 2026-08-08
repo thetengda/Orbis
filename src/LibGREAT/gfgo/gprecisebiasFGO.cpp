@@ -11,7 +11,17 @@ namespace gfgo
 	{
 	}
 
-	bool t_gprecisebiasFGO::cmb_equ(bool isFGO, bool calculate_equ, t_gtime &epoch, t_gallpar &params, t_gsatdata &obsdata, t_gobs &gobs, t_gbaseEquation &result)
+	bool t_gprecisebiasFGO::cmb_equ(bool isFGO, bool calculate_equ, t_gtime &epoch,
+		t_gallpar &params, t_gsatdata &obsdata, t_gobs &gobs,
+		t_gbaseEquation &result)
+	{
+		return cmb_equ(isFGO, calculate_equ, epoch, params, obsdata, gobs,
+			result, false);
+	}
+
+	bool t_gprecisebiasFGO::cmb_equ(bool isFGO, bool calculate_equ, t_gtime &epoch,
+		t_gallpar &params, t_gsatdata &obsdata, t_gobs &gobs,
+		t_gbaseEquation &result, bool force_refresh)
 	{
 		// Serialize residual evaluation on the shared scratch state when the
 		// Ceres solve uses num_threads > 1.  The FGO factors call cmb_equ from
@@ -31,7 +41,11 @@ namespace gfgo
 		}
 
 		tuple<string, string, t_gtime>* flag = &_rec_sat_before;
-		if (make_tuple(obsdata.site(), obsdata.sat(), epoch) != *flag)
+		// The legacy cache key contains only site/satellite/epoch.  That is
+		// sufficient while forming one filter equation, but not while Ceres
+		// repeatedly evaluates the same observation at different parameter
+		// points.  RAW factors therefore request a complete refresh.
+		if (force_refresh || make_tuple(obsdata.site(), obsdata.sat(), epoch) != *flag)
 		{
 			bool update_valid = t_gprecisebiasGPP::_update_obs_info_GPP(epoch, _gall_nav, _gallobj, obsdata, params);
 			if (!update_valid)
@@ -101,16 +115,6 @@ namespace gfgo
 				if (_spdlog)
 					SPDLOG_LOGGER_ERROR(_spdlog, "partialrange obs failed");
 				return false;
-			}
-
-			static std::set<std::string> logged_equations;
-			std::string diag_key = std::to_string(epoch.sow()) + "," + obsdata.sat() + "," + gobs2str(gobs.gobs());
-			if (epoch.sow() <= 31741.5 && logged_equations.insert(diag_key).second)
-			{
-				std::ofstream diag("ppp_first_epoch_equations.csv", std::ios::app);
-				diag << std::setprecision(15) << "OPEN," << epoch.sow() << "," << obsdata.sat()
-				     << "," << gobs2str(gobs.gobs()) << "," << Obs_value << "," << omc << "," << wgt
-				     << "," << _crt_obs.rho() << "," << _crt_obs.clk() << "," << _crt_obs.ele() << "\n";
 			}
 
 			/*cout << " omc= " << omc << " wgt= " << wgt << endl;

@@ -12,9 +12,9 @@ namespace gfgo
     {
         const double crd[3] = {parameters[0][0], parameters[0][1], parameters[0][2]};
         raw_factor_detail::RawLinearization linear;
-        if (!raw_factor_detail::linearize(_message, _params, _bias_model, crd,
-                                          parameters[1][0], parameters[2][0], parameters[3][0],
-                                          0.0, 0.0, false, false, linear))
+        if (!raw_factor_detail::linearizeCached(_message, _params, _bias_model, crd,
+                                                parameters[1][0], parameters[2][0], parameters[3][0],
+                                                0.0, 0.0, false, false, _cache, linear))
         {
             return false;
         }
@@ -46,9 +46,9 @@ namespace gfgo
     {
         const double crd[3] = {parameters[0][0], parameters[0][1], parameters[0][2]};
         raw_factor_detail::RawLinearization linear;
-        if (!raw_factor_detail::linearize(_message, _params, _bias_model, crd,
-                                          parameters[1][0], parameters[2][0], parameters[3][0],
-                                          parameters[4][0], 0.0, true, false, linear))
+        if (!raw_factor_detail::linearizeCached(_message, _params, _bias_model, crd,
+                                                parameters[1][0], parameters[2][0], parameters[3][0],
+                                                parameters[4][0], 0.0, true, false, _cache, linear))
         {
             return false;
         }
