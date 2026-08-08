@@ -14,7 +14,7 @@ namespace gfgo
         raw_factor_detail::RawLinearization linear;
         if (!raw_factor_detail::linearizeCached(_message, _params, _bias_model, crd,
                                                 parameters[1][0], parameters[2][0], parameters[3][0],
-                                                0.0, parameters[4][0], false, true, _cache, linear))
+                                                0.0, 0.0, parameters[4][0], false, false, true, _cache, linear))
         {
             return false;
         }
@@ -50,7 +50,7 @@ namespace gfgo
         raw_factor_detail::RawLinearization linear;
         if (!raw_factor_detail::linearizeCached(_message, _params, _bias_model, crd,
                                                 parameters[1][0], parameters[2][0], parameters[3][0],
-                                                parameters[4][0], parameters[5][0], true, true, _cache, linear))
+                                                parameters[4][0], 0.0, parameters[5][0], true, false, true, _cache, linear))
         {
             return false;
         }

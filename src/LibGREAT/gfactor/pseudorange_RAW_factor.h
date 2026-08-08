@@ -34,6 +34,32 @@ namespace gfgo
         t_gprecisebiasFGO *_bias_model = nullptr;
         mutable raw_factor_detail::RawEvaluationCache _cache;
     };
+
+    class LibGREAT_LIBRARY_EXPORT PseudorangeRAWIFBFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1, 1>
+    {
+    public:
+        PseudorangeRAWIFBFactor(const RAWEquMsg &message, const t_gallpar &params, t_gprecisebiasFGO *bias_model);
+        bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const override;
+
+    private:
+        RAWEquMsg _message;
+        mutable t_gallpar _params;
+        t_gprecisebiasFGO *_bias_model = nullptr;
+        mutable raw_factor_detail::RawEvaluationCache _cache;
+    };
+
+    class LibGREAT_LIBRARY_EXPORT MultiPseudorangeRAWIFBFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1, 1, 1>
+    {
+    public:
+        MultiPseudorangeRAWIFBFactor(const RAWEquMsg &message, const t_gallpar &params, t_gprecisebiasFGO *bias_model);
+        bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const override;
+
+    private:
+        RAWEquMsg _message;
+        mutable t_gallpar _params;
+        t_gprecisebiasFGO *_bias_model = nullptr;
+        mutable raw_factor_detail::RawEvaluationCache _cache;
+    };
 }
 
 #endif

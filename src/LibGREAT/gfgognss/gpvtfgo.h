@@ -119,6 +119,19 @@ namespace gfgomsf
 
 		using RawConstraintKey = std::pair<int, int>;
 
+		enum RawIfbSlot
+		{
+			RAW_IFB_GPS = 0,
+			RAW_IFB_GAL_F3,
+			RAW_IFB_GAL_F4,
+			RAW_IFB_GAL_F5,
+			RAW_IFB_BDS_F3,
+			RAW_IFB_BDS_F4,
+			RAW_IFB_BDS_F5,
+			RAW_IFB_QZS,
+			RAW_IFB_COUNT
+		};
+
 		class DDEquMsg
 		{
 		public:
@@ -220,10 +233,14 @@ namespace gfgomsf
 		double _isb_BDS[GWINDOW_SIZE + 1];
 		double _isb_GLO[GWINDOW_SIZE + 1];
 		double _isb_QZS[GWINDOW_SIZE + 1];
+		double _ifb[RAW_IFB_COUNT][GWINDOW_SIZE + 1];
+		double _ifb_initial_value[RAW_IFB_COUNT][GWINDOW_SIZE + 1];
 		bool _lost_isb_GAL[GWINDOW_SIZE + 1];
 		bool _lost_isb_BDS[GWINDOW_SIZE + 1];
 		bool _lost_isb_GLO[GWINDOW_SIZE + 1];
 		bool _lost_isb_QZS[GWINDOW_SIZE + 1];
+		bool _lost_ifb[RAW_IFB_COUNT][GWINDOW_SIZE + 1];
+		bool _raw_ifb_initial[RAW_IFB_COUNT][GWINDOW_SIZE + 1];
 
 		ofstream _output_float_solution;//add for MultiWindow
 		ofstream _output_estimator_info;//add for MultiWindow
@@ -390,6 +407,9 @@ namespace gfgomsf
 		 * mutable scratch state.
 		 */
 		ceres::Solver::Options _ceres_solver_options() const;
+		static int _raw_ifb_slot(GSYS system, FREQ_SEQ frequency);
+		static par_type _raw_ifb_type(int slot);
+		t_randomwalk *_raw_ifb_stochastic_model(int slot) const;
 		void _add_RAW_fixed_constraints(ceres::Problem &problem,
 			const std::set<int> &problem_ambiguities);
 		bool _write_RAW_fixed_solution(t_gallpar &fixed_parameters);

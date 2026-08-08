@@ -19,9 +19,11 @@ namespace raw_factor_detail
         double trp = 0.0;
         double sion = 0.0;
         double isb = 0.0;
+        double ifb = 0.0;
         double amb = 0.0;
         double coefficient[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         double isb_coefficient = 0.0;
+        double ifb_coefficient = 0.0;
         double amb_coefficient = 0.0;
         double residual = 0.0;
         double sqrt_info = 0.0;
@@ -31,7 +33,7 @@ namespace raw_factor_detail
     {
         std::mutex mutex;
         bool valid = false;
-        std::array<double, 8> state{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+        std::array<double, 9> state{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
         RawLinearization linearization;
     };
 
@@ -47,6 +49,29 @@ namespace raw_factor_detail
             return par_type::GLO_ISB;
         case GSYS::QZS:
             return par_type::QZS_ISB;
+        default:
+            return par_type::NO_DEF;
+        }
+    }
+
+    inline par_type ifbType(GSYS system, FREQ_SEQ frequency)
+    {
+        switch (system)
+        {
+        case GSYS::GPS:
+            return frequency == FREQ_3 ? par_type::IFB_GPS : par_type::NO_DEF;
+        case GSYS::GAL:
+            if (frequency == FREQ_3) return par_type::IFB_GAL;
+            if (frequency == FREQ_4) return par_type::IFB_GAL_2;
+            if (frequency == FREQ_5) return par_type::IFB_GAL_3;
+            return par_type::NO_DEF;
+        case GSYS::BDS:
+            if (frequency == FREQ_3) return par_type::IFB_BDS;
+            if (frequency == FREQ_4) return par_type::IFB_BDS_2;
+            if (frequency == FREQ_5) return par_type::IFB_BDS_3;
+            return par_type::NO_DEF;
+        case GSYS::QZS:
+            return frequency == FREQ_3 ? par_type::IFB_QZS : par_type::NO_DEF;
         default:
             return par_type::NO_DEF;
         }
@@ -78,8 +103,10 @@ namespace raw_factor_detail
                           double trp,
                           double sion,
                           double isb,
+                          double ifb,
                           double amb,
                           bool use_isb,
+                          bool use_ifb,
                           bool use_amb,
                           RawLinearization &out)
     {
@@ -94,6 +121,7 @@ namespace raw_factor_detail
         out.trp = trp;
         out.sion = sion;
         out.isb = isb;
+        out.ifb = ifb;
         out.amb = amb;
 
         const string site = message.site.empty() ? message.satdata.site() : message.site;
@@ -110,6 +138,13 @@ namespace raw_factor_detail
             const par_type type = isbType(message.satdata.gsys());
             if (type != par_type::NO_DEF)
                 setOrAdd(params, site, type, "", isb);
+        }
+        if (use_ifb)
+        {
+            const par_type type = ifbType(message.satdata.gsys(), message.freq);
+            if (type == par_type::NO_DEF)
+                return false;
+            setOrAdd(params, site, type, "", ifb);
         }
 
         t_gsatdata obsdata = message.satdata;
@@ -156,6 +191,16 @@ namespace raw_factor_detail
             case par_type::QZS_ISB:
                 out.isb_coefficient += item.second;
                 break;
+            case par_type::IFB_GPS:
+            case par_type::IFB_GAL:
+            case par_type::IFB_GAL_2:
+            case par_type::IFB_GAL_3:
+            case par_type::IFB_BDS:
+            case par_type::IFB_BDS_2:
+            case par_type::IFB_BDS_3:
+            case par_type::IFB_QZS:
+                out.ifb_coefficient += item.second;
+                break;
             default:
                 break;
             }
@@ -179,14 +224,17 @@ namespace raw_factor_detail
                                 double trp,
                                 double sion,
                                 double isb,
+                                double ifb,
                                 double amb,
                                 bool use_isb,
+                                bool use_ifb,
                                 bool use_amb,
                                 RawEvaluationCache &cache,
                                 RawLinearization &out)
     {
-        const std::array<double, 8> state{{crd[0], crd[1], crd[2], clk, trp,
+        const std::array<double, 9> state{{crd[0], crd[1], crd[2], clk, trp,
                                            sion, use_isb ? isb : 0.0,
+                                           use_ifb ? ifb : 0.0,
                                            use_amb ? amb : 0.0}};
         std::lock_guard<std::mutex> lock(cache.mutex);
         if (cache.valid && cache.state == state)
@@ -197,7 +245,7 @@ namespace raw_factor_detail
 
         RawLinearization linearization;
         if (!linearize(message, params, bias_model, crd, clk, trp, sion,
-                       isb, amb, use_isb, use_amb, linearization))
+                       isb, ifb, amb, use_isb, use_ifb, use_amb, linearization))
         {
             cache.valid = false;
             return false;

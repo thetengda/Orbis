@@ -137,6 +137,13 @@ t_gfgo_para(gset) {
 			_lost_isb_BDS[i] = false;
 			_lost_isb_GLO[i] = false;
 			_lost_isb_QZS[i] = false;
+			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+			{
+				_ifb[slot][i] = 0.0;
+				_ifb_initial_value[slot][i] = 0.0;
+				_lost_ifb[slot][i] = true;
+				_raw_ifb_initial[slot][i] = false;
+			}
 		}
 		_headers[i]=0.0;
 		_rover_window[i] = nullptr;
@@ -781,6 +788,63 @@ void gfgomsf::t_gpvtfgo::clearWindow()
 		memset(_para_AMB_IF, 0, sizeof(_para_AMB_IF));
 		memset(_para_AMB_RAW, 0, sizeof(_para_AMB_RAW));
 		memset(_para_SION, 0, sizeof(_para_SION));
+		memset(_ifb, 0, sizeof(_ifb));
+		memset(_ifb_initial_value, 0, sizeof(_ifb_initial_value));
+		for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+			for (int node = 0; node <= gwindow_size; ++node)
+			{
+				_lost_ifb[slot][node] = true;
+				_raw_ifb_initial[slot][node] = false;
+			}
+	}
+}
+
+int gfgomsf::t_gpvtfgo::_raw_ifb_slot(GSYS system, FREQ_SEQ frequency)
+{
+	const par_type type = raw_factor_detail::ifbType(system, frequency);
+	switch (type)
+	{
+	case par_type::IFB_GPS: return RAW_IFB_GPS;
+	case par_type::IFB_GAL: return RAW_IFB_GAL_F3;
+	case par_type::IFB_GAL_2: return RAW_IFB_GAL_F4;
+	case par_type::IFB_GAL_3: return RAW_IFB_GAL_F5;
+	case par_type::IFB_BDS: return RAW_IFB_BDS_F3;
+	case par_type::IFB_BDS_2: return RAW_IFB_BDS_F4;
+	case par_type::IFB_BDS_3: return RAW_IFB_BDS_F5;
+	case par_type::IFB_QZS: return RAW_IFB_QZS;
+	default: return -1;
+	}
+}
+
+par_type gfgomsf::t_gpvtfgo::_raw_ifb_type(int slot)
+{
+	switch (slot)
+	{
+	case RAW_IFB_GPS: return par_type::IFB_GPS;
+	case RAW_IFB_GAL_F3: return par_type::IFB_GAL;
+	case RAW_IFB_GAL_F4: return par_type::IFB_GAL_2;
+	case RAW_IFB_GAL_F5: return par_type::IFB_GAL_3;
+	case RAW_IFB_BDS_F3: return par_type::IFB_BDS;
+	case RAW_IFB_BDS_F4: return par_type::IFB_BDS_2;
+	case RAW_IFB_BDS_F5: return par_type::IFB_BDS_3;
+	case RAW_IFB_QZS: return par_type::IFB_QZS;
+	default: return par_type::NO_DEF;
+	}
+}
+
+gnut::t_randomwalk *gfgomsf::t_gpvtfgo::_raw_ifb_stochastic_model(int slot) const
+{
+	switch (slot)
+	{
+	case RAW_IFB_GPS: return _gpsStoModel;
+	case RAW_IFB_GAL_F3:
+	case RAW_IFB_GAL_F4:
+	case RAW_IFB_GAL_F5: return _galStoModel;
+	case RAW_IFB_BDS_F3:
+	case RAW_IFB_BDS_F4:
+	case RAW_IFB_BDS_F5: return _bdsStoModel;
+	case RAW_IFB_QZS: return _qzsStoModel;
+	default: return nullptr;
 	}
 }
 
@@ -1208,6 +1272,8 @@ void gfgomsf::t_gpvtfgo::_get_initial_value(const t_gtime& runEpoch)
 	{
 		_cntrep++;
 		_syncSys();
+		if (_frequency >= 3)
+			_syncIFB();
 	}
 	if (_phase)
 	{
@@ -1331,6 +1397,30 @@ void gfgomsf::t_gpvtfgo::_set_initial_value(const t_gtime& runEpoch)
 		{
 			_lost_isb_QZS[_rover_count] = true;
 			_isb_QZS[_rover_count] = 0.0;
+		}
+
+		for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+		{
+			_raw_ifb_initial[slot][_rover_count] = false;
+			_ifb_initial_value[slot][_rover_count] = 0.0;
+			id = _param.getParam(_site, _raw_ifb_type(slot), "");
+			if (id >= 0)
+			{
+				_lost_ifb[slot][_rover_count] = false;
+				if (_rover_count > 0 && !_lost_ifb[slot][_rover_count - 1])
+					_ifb[slot][_rover_count] = _ifb[slot][_rover_count - 1];
+				else
+				{
+					_ifb[slot][_rover_count] = _param[id].value();
+					_ifb_initial_value[slot][_rover_count] = _ifb[slot][_rover_count];
+					_raw_ifb_initial[slot][_rover_count] = true;
+				}
+			}
+			else
+			{
+				_lost_ifb[slot][_rover_count] = true;
+				_ifb[slot][_rover_count] = 0.0;
+			}
 		}
 
         //save the ini value
@@ -1978,6 +2068,8 @@ void gfgomsf::t_gpvtfgo::_vector_to_double()
 				_para_ISB_GLO[i][0] = _isb_GLO[i];
 			if (!_lost_isb_QZS[i])
 				_para_ISB_QZS[i][0] = _isb_QZS[i];
+			// IFB states are stored directly in stable scalar buffers, so no
+			// separate vector-to-array copy is required here.
 		}
 	}
 }
@@ -3427,6 +3519,9 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
                 problem.AddParameterBlock(_para_ISB_GLO[i], 1);
 			if (!_lost_isb_QZS[i])
 				problem.AddParameterBlock(_para_ISB_QZS[i], 1);
+			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+				if (!_lost_ifb[slot][i])
+					problem.AddParameterBlock(&_ifb[slot][i], 1);
         }
 
         // --- SION and ambiguity parameter blocks. ---
@@ -3522,6 +3617,16 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 			if (!_lost_isb_QZS[i] && !_lost_isb_QZS[i - 1] && _qzsStoModel)
 				problem.AddResidualBlock(new RandomWalkFactor(1.0 / sqrt(graph_interval_random_walk_q(_qzsStoModel, graph_dt))), nullptr,
 									 _para_ISB_QZS[i - 1], _para_ISB_QZS[i]);
+			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+			{
+				t_randomwalk *model = _raw_ifb_stochastic_model(slot);
+				if (_lost_ifb[slot][i] || _lost_ifb[slot][i - 1] || !model)
+					continue;
+				const double q = graph_interval_random_walk_q(model, graph_dt);
+				if (q > 0.0 && std::isfinite(q))
+					problem.AddResidualBlock(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+										 &_ifb[slot][i - 1], &_ifb[slot][i]);
+			}
         }
 
         // Per-node state initial priors (weak absolute references that keep every
@@ -3539,6 +3644,10 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
                 problem.AddResidualBlock(new InitialFactor(0.0, 1.0 / _sig_init_glo), nullptr, _para_ISB_GLO[i]);
 			if (!_lost_isb_QZS[i])
 				problem.AddResidualBlock(new InitialFactor(0.0, 1.0 / _sig_init_qzs), nullptr, _para_ISB_QZS[i]);
+			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+				if (!_lost_ifb[slot][i] && _raw_ifb_initial[slot][i])
+					problem.AddResidualBlock(new InitialFactor(_ifb_initial_value[slot][i], 1.0 / 3000.0),
+										 nullptr, &_ifb[slot][i]);
         }
         // Weak prior on each ambiguity arc's float start value from the
         // RAW ambiguity manager (defines the estimable integer combination).
@@ -3583,25 +3692,41 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
                 ceres::CostFunction *measurement_cost = nullptr;
                 ceres::LossFunction *measurement_loss = nullptr;
                 vector<double *> measurement_blocks;
-                if (message.obs_type == TYPE_C)
-                {
-                    if (is_gps)
-                    {
-                        measurement_cost = new PseudorangeRAWFactor(
-                            message, params_temp, _gbias_model);
-                        measurement_blocks = {_para_CRD[i], _para_CLK[i],
-                                              _para_TRP[i], &_para_SION[i][sat_id]};
-                    }
-                    else
+				if (message.obs_type == TYPE_C)
+				{
+					const int ifb_slot = _raw_ifb_slot(system, message.freq);
+					const bool use_ifb = ifb_slot >= 0 && !_lost_ifb[ifb_slot][i];
+					if (is_gps)
+					{
+						measurement_blocks = {_para_CRD[i], _para_CLK[i],
+											  _para_TRP[i], &_para_SION[i][sat_id]};
+						if (use_ifb)
+						{
+							measurement_cost = new PseudorangeRAWIFBFactor(
+								message, params_temp, _gbias_model);
+							measurement_blocks.push_back(&_ifb[ifb_slot][i]);
+						}
+						else
+							measurement_cost = new PseudorangeRAWFactor(
+								message, params_temp, _gbias_model);
+					}
+					else
                     {
                         double *isb = is_gal ? _para_ISB_GAL[i] :
 						(is_bds ? _para_ISB_BDS[i] :
 						 (is_glo ? _para_ISB_GLO[i] : _para_ISB_QZS[i]));
-                        measurement_cost = new MultiPseudorangeRAWFactor(
-                            message, params_temp, _gbias_model);
-                        measurement_blocks = {_para_CRD[i], _para_CLK[i],
-                                              _para_TRP[i], &_para_SION[i][sat_id], isb};
-                    }
+						measurement_blocks = {_para_CRD[i], _para_CLK[i],
+											  _para_TRP[i], &_para_SION[i][sat_id], isb};
+						if (use_ifb)
+						{
+							measurement_cost = new MultiPseudorangeRAWIFBFactor(
+								message, params_temp, _gbias_model);
+							measurement_blocks.push_back(&_ifb[ifb_slot][i]);
+						}
+						else
+							measurement_cost = new MultiPseudorangeRAWFactor(
+								message, params_temp, _gbias_model);
+					}
                     measurement_loss = loss_function;
                 }
                 else if (message.obs_type == TYPE_L && message.amb_index >= 0 &&
@@ -4349,6 +4474,13 @@ void gfgomsf::t_gpvtfgo::_rollback_current_ppp_node()
 	_lost_isb_BDS[failed_rover] = false;
 	_lost_isb_GLO[failed_rover] = false;
 	_lost_isb_QZS[failed_rover] = false;
+	for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+	{
+		_ifb[slot][failed_rover] = 0.0;
+		_ifb_initial_value[slot][failed_rover] = 0.0;
+		_lost_ifb[slot][failed_rover] = true;
+		_raw_ifb_initial[slot][failed_rover] = false;
+	}
 
 	if (failed_rover > 0)
 	{
@@ -4409,10 +4541,20 @@ void gfgomsf::t_gpvtfgo::_slide_window()
 				_lost_isb_BDS[i] = _lost_isb_BDS[i + 1];
 				_lost_isb_GLO[i] = _lost_isb_GLO[i + 1];
 				_lost_isb_QZS[i] = _lost_isb_QZS[i + 1];
+				for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+				{
+					_ifb[slot][i] = _ifb[slot][i + 1];
+					_ifb_initial_value[slot][i] = _ifb_initial_value[slot][i + 1];
+					_lost_ifb[slot][i] = _lost_ifb[slot][i + 1];
+					_raw_ifb_initial[slot][i] = _raw_ifb_initial[slot][i + 1];
+				}
 			}
 		}
 		if (!_isBase && _observ == OBSCOMBIN::RAW_ALL)
 			_raw_sion_initial_nodes[gwindow_size - 1].clear();
+		if (!_isBase)
+			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+				_raw_ifb_initial[slot][gwindow_size - 1] = false;
 		if(_isBase)
 		{
 			_vDD_msg.erase(_vDD_msg.begin());
@@ -4866,6 +5008,9 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
             if (address == _para_ISB_GAL[0] || address == _para_ISB_BDS[0] ||
 				address == _para_ISB_GLO[0] || address == _para_ISB_QZS[0])
                 return true;
+			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+				if (address == &_ifb[slot][0])
+					return true;
             for (int sat_id = 0; sat_id < NUM_OF_ARC; ++sat_id)
             {
                 if (address == &_para_SION[0][sat_id])
@@ -4923,20 +5068,36 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
 
         if (message.obs_type == TYPE_C)
         {
+			const int ifb_slot = _raw_ifb_slot(system, message.freq);
+			const bool use_ifb = ifb_slot >= 0 && !_lost_ifb[ifb_slot][0];
             if (is_gps)
             {
-                cost = new PseudorangeRAWFactor(message, params_temp, _gbias_model);
                 blocks = {_para_CRD[0], _para_CLK[0], _para_TRP[0], &_para_SION[0][message.sat_global_id]};
+				if (use_ifb)
+				{
+					cost = new PseudorangeRAWIFBFactor(message, params_temp, _gbias_model);
+					blocks.push_back(&_ifb[ifb_slot][0]);
+					drop_set.push_back(4);
+				}
+				else
+					cost = new PseudorangeRAWFactor(message, params_temp, _gbias_model);
             }
             else
             {
                 double *isb = is_gal ? _para_ISB_GAL[0] :
 					(is_bds ? _para_ISB_BDS[0] :
 					 (is_glo ? _para_ISB_GLO[0] : _para_ISB_QZS[0]));
-                cost = new MultiPseudorangeRAWFactor(message, params_temp, _gbias_model);
                 blocks = {_para_CRD[0], _para_CLK[0], _para_TRP[0],
                           &_para_SION[0][message.sat_global_id], isb};
                 drop_set.push_back(4); // ISB is propagated by its random walk.
+				if (use_ifb)
+				{
+					cost = new MultiPseudorangeRAWIFBFactor(message, params_temp, _gbias_model);
+					blocks.push_back(&_ifb[ifb_slot][0]);
+					drop_set.push_back(5);
+				}
+				else
+					cost = new MultiPseudorangeRAWFactor(message, params_temp, _gbias_model);
             }
         }
         else if (message.obs_type == TYPE_L && message.amb_index >= 0 && message.amb_index < NUM_OF_ARC)
@@ -5009,6 +5170,16 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
                 vector<double *>{&_para_SION[0][sat_id]}, vector<int>{0}));
     }
 
+	for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+	{
+		if (_lost_ifb[slot][0] || !_raw_ifb_initial[slot][0])
+			continue;
+		gnss_marginalization_info->addResidualBlockInfo(
+			new GNSSResidualBlockInfo(
+				new InitialFactor(_ifb_initial_value[slot][0], 1.0 / 3000.0), nullptr,
+				vector<double *>{&_ifb[slot][0]}, vector<int>{0}));
+	}
+
     // Carry the dynamic states from node 1 into the next window node 0.
     // The process factors themselves are part of the marginalization system,
     // so their outgoing endpoint is eliminated together with node 0.
@@ -5055,6 +5226,17 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
 				gnss_marginalization_info->addResidualBlockInfo(
 					new GNSSResidualBlockInfo(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
 												  vector<double *>{_para_ISB_QZS[0], _para_ISB_QZS[1]}, vector<int>{0}));
+		}
+		for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+		{
+			t_randomwalk *model = _raw_ifb_stochastic_model(slot);
+			if (_lost_ifb[slot][0] || _lost_ifb[slot][1] || !model)
+				continue;
+			const double q = graph_interval_random_walk_q(model, graph_dt);
+			if (q > 0.0 && std::isfinite(q))
+				gnss_marginalization_info->addResidualBlockInfo(
+					new GNSSResidualBlockInfo(new RandomWalkFactor(1.0 / sqrt(q)), nullptr,
+						vector<double *>{&_ifb[slot][0], &_ifb[slot][1]}, vector<int>{0}));
 		}
 
         if (_ionStoModel && _vRAW_msg.size() > 1)
@@ -5153,6 +5335,8 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
     addr_shift[reinterpret_cast<ParameterBlockKey>(_para_ISB_BDS[1])] = _para_ISB_BDS[0];
     addr_shift[reinterpret_cast<ParameterBlockKey>(_para_ISB_GLO[1])] = _para_ISB_GLO[0];
     addr_shift[reinterpret_cast<ParameterBlockKey>(_para_ISB_QZS[1])] = _para_ISB_QZS[0];
+	for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+		addr_shift[reinterpret_cast<ParameterBlockKey>(&_ifb[slot][1])] = &_ifb[slot][0];
     for (int sat_id = 0; sat_id < NUM_OF_ARC; ++sat_id)
         addr_shift[reinterpret_cast<ParameterBlockKey>(&_para_SION[1][sat_id])] = &_para_SION[0][sat_id];
     for (int amb_id = 0; amb_id < NUM_OF_ARC; ++amb_id)
@@ -5603,12 +5787,27 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
              register_descriptor(blocks[3], {make_parameter(par_type::SION, message.sat_id,
                                                               _para_SION[node][message.sat_global_id], false)});
 
-            if (message.obs_type == TYPE_C && !is_gps)
+            if (message.obs_type == TYPE_C)
             {
-                register_descriptor(blocks[4], {make_parameter(raw_factor_detail::isbType(system), "",
-                                                                 is_gal ? _para_ISB_GAL[node][0] :
-						 (is_bds ? _para_ISB_BDS[node][0] :
-						  (is_glo ? _para_ISB_GLO[node][0] : _para_ISB_QZS[node][0])), false)});
+				int next_block = 4;
+				if (!is_gps)
+				{
+					register_descriptor(blocks[next_block], {make_parameter(raw_factor_detail::isbType(system), "",
+						is_gal ? _para_ISB_GAL[node][0] :
+						(is_bds ? _para_ISB_BDS[node][0] :
+						 (is_glo ? _para_ISB_GLO[node][0] : _para_ISB_QZS[node][0])), false)});
+					++next_block;
+				}
+				const int ifb_slot = _raw_ifb_slot(system, message.freq);
+				if (ifb_slot >= 0 && !_lost_ifb[ifb_slot][node])
+				{
+					if (next_block >= static_cast<int>(blocks.size()))
+						parameter_addresses_consistent = false;
+					else
+						register_descriptor(blocks[next_block],
+							{make_parameter(_raw_ifb_type(ifb_slot), "",
+											_ifb[ifb_slot][node], false)});
+				}
             }
             else if (message.obs_type == TYPE_L)
             {
