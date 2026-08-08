@@ -11,6 +11,7 @@
 
 #include "gcfg_fgomsf.h"
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 
 using namespace std;
@@ -34,7 +35,17 @@ int main(int argc, char** argv)
 	gset.arg(argc, argv, true, false);
 	try
 	{
-		(void)dynamic_cast<t_gsetfgo *>(&gset)->ambiguity_feedback_mode();
+		auto *fgo_settings = dynamic_cast<t_gsetfgo *>(&gset);
+		(void)fgo_settings->ambiguity_feedback_mode();
+		if (fgo_settings->window_size() > WINDOW_SIZE)
+			throw std::invalid_argument(
+				"fgo/window_size exceeds the compiled FGO window capacity");
+		if (fgo_settings->gwindow_size() > GWINDOW_SIZE)
+			throw std::invalid_argument(
+				"fgo/gnss_window_size exceeds the compiled GNSS window capacity");
+		if (fgo_settings->gins_window_size() > GINS_WINDOW_SIZE)
+			throw std::invalid_argument(
+				"fgo/gins_window_size exceeds the compiled GINS window capacity");
 	}
 	catch (const std::exception &error)
 	{

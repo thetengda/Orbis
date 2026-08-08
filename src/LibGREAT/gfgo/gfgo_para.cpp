@@ -11,6 +11,8 @@
 
 #include "gfgo_para.h"
 
+#include <stdexcept>
+
 namespace gfgo
 {
 
@@ -44,6 +46,15 @@ namespace gfgo
 		window_size = dynamic_cast<t_gsetfgo*>(gset)->window_size();
 		gwindow_size = dynamic_cast<t_gsetfgo*>(gset)->gwindow_size();
 		gins_window_size= dynamic_cast<t_gsetfgo*>(gset)->gins_window_size();
+		if (window_size > WINDOW_SIZE)
+			throw std::invalid_argument(
+				"fgo/window_size exceeds the compiled FGO window capacity");
+		if (gwindow_size > GWINDOW_SIZE)
+			throw std::invalid_argument(
+				"fgo/gnss_window_size exceeds the compiled GNSS window capacity");
+		if (gins_window_size > GINS_WINDOW_SIZE)
+			throw std::invalid_argument(
+				"fgo/gins_window_size exceeds the compiled GINS window capacity");
 		
 	}
 

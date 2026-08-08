@@ -474,6 +474,13 @@ int gfgomsf::t_gpvtfgo::processBatch(const t_gtime &beg_r, const t_gtime &end_r,
 
 	}
 	_print_fgo_prof();
+	if (!_isBase && _observ == OBSCOMBIN::RAW_ALL && _ambRAW_manager && _spdlog)
+	{
+		_spdlog->info(
+			"PPP RAW allocation high-water: {} satellite ID(s), {} ambiguity ID(s), {} active ambiguity arc(s), capacity {}",
+			_global_sat_id + 1, _global_amb_id + 1,
+			_ambRAW_manager->getAmbCount(), NUM_OF_ARC);
+	}
 
 	_gmutex.unlock();
 	return 1;
@@ -3366,6 +3373,29 @@ bool gfgomsf::t_gpvtfgo::_validate_RAW_constraint_values(
 	return true;
 }
 
+bool gfgomsf::t_gpvtfgo::_RAW_graph_has_live_fixed_ambiguity() const
+{
+	// Residual IDs describe factors actually installed in the retained Ceres
+	// problem, so they are the strongest evidence of a currently fixed arc.
+	if (!_raw_feedback_constraint_residuals.empty())
+		return true;
+	if (!_raw_prior_contains_fixed_information ||
+		_raw_feedback_problem_ambiguities.empty())
+		return false;
+
+	// A Schur prior may retain an integer-derived unary relation after one
+	// endpoint leaves the window.  It no longer represents a current ambiguity
+	// fix once both provenance endpoints have left the current problem.
+	for (const auto &entry : _raw_prior_fixed_constraint_history)
+	{
+		const RawFixedConstraint &constraint = entry.second;
+		if (_raw_feedback_problem_ambiguities.count(constraint.amb_a) > 0 ||
+			_raw_feedback_problem_ambiguities.count(constraint.amb_b) > 0)
+			return true;
+	}
+	return false;
+}
+
 bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 {
     if (!_ambfix || !_write_RAW_fixed_solution(_param_fixed))
@@ -3429,9 +3459,7 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
     {
         if (!_validate_RAW_constraint_values(candidates))
 			return false;
-        _graph_ambiguity_fixed =
-			_raw_prior_contains_fixed_information ||
-			!_raw_feedback_constraint_residuals.empty();
+		_graph_ambiguity_fixed = _RAW_graph_has_live_fixed_ambiguity();
         return _graph_ambiguity_fixed;
     }
 
@@ -3972,9 +4000,7 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 			}
             _raw_feedback_problem_ambiguities = raw_ambiguities;
             _raw_feedback_problem = std::move(problem_owner);
-            _graph_ambiguity_fixed =
-				_raw_prior_contains_fixed_information ||
-				!_raw_feedback_constraint_residuals.empty();
+			_graph_ambiguity_fixed = _RAW_graph_has_live_fixed_ambiguity();
         }
         // End of the rejection loop: this rebuilds and re-solves the window
         // until _gobs_outlier_detection reports no further outlier to drop.
@@ -4323,6 +4349,19 @@ void gfgomsf::t_gpvtfgo::_record_ppp_cycle_slips(
 			const std::string sat_name = sat_data.sat();
 			const GSYS system = sat_data.gsys();
 			const std::vector<GOBSBAND> bands = gnss_setting->band(system);
+			auto clear_unusable_pending_frequency =
+				[&](const FREQ_SEQ frequency)
+				{
+					auto pending_sat = _pending_raw_slips.find(sat_name);
+					if (pending_sat == _pending_raw_slips.end())
+						return;
+					pending_sat->second.erase(frequency);
+					if (pending_sat->second.empty())
+					{
+						_pending_raw_slips.erase(pending_sat);
+						_pending_ppp_slips.erase(sat_name);
+					}
+				};
 			const int frequency_count =
 				(std::min)(5, bands.empty() ? 5 : static_cast<int>(bands.size()));
 			for (int frequency_number = 1;
@@ -4340,6 +4379,19 @@ void gfgomsf::t_gpvtfgo::_record_ppp_cycle_slips(
 				if (phase_gobs == GOBS::X ||
 					double_eq(sat_data.obs_L(phase_obs), 0.0))
 				{
+					clear_unusable_pending_frequency(frequency);
+					continue;
+				}
+
+				// In OSB mode an uncorrected carrier is deliberately excluded by
+				// _combine_RAW().  Do not create continuity/slip state for an
+				// observation which cannot enter the graph.  Otherwise a pending
+				// slip can never be committed and resetFrequencyArc() consumes one
+				// monotonically allocated ambiguity ID on every following epoch.
+				if (_upd_mode == UPD_MODE::OSB &&
+					!sat_data.osb_corrected(phase_gobs))
+				{
+					clear_unusable_pending_frequency(frequency);
 					continue;
 				}
 
@@ -4506,16 +4558,36 @@ void gfgomsf::t_gpvtfgo::_commit_ppp_cycle_slips()
 				{
 					return sat.first == candidate.first;
 				});
-			if (active == active_sats.end() ||
-				!_ppp_candidate_has_phase(candidate.first))
+			if (active == active_sats.end())
 			{
 				continue;
 			}
 
-			_last_raw_phase_obs[candidate.first] = candidate.second;
 			const auto epoch = _candidate_raw_phase_epoch.find(candidate.first);
-			if (epoch != _candidate_raw_phase_epoch.end())
-				_last_raw_phase_epoch[candidate.first] = epoch->second;
+			for (const auto &frequency_obs : candidate.second)
+			{
+				const bool installed = std::any_of(
+					_vRAW_msg[_rover_count].begin(), _vRAW_msg[_rover_count].end(),
+					[&candidate, &frequency_obs](const RAWEquMsg &message)
+					{
+						return message.obs_type == GOBSTYPE::TYPE_L &&
+							message.sat_id == candidate.first &&
+							message.freq == frequency_obs.first &&
+							message.obs == frequency_obs.second;
+					});
+				if (!installed)
+					continue;
+
+				_last_raw_phase_obs[candidate.first][frequency_obs.first] =
+					frequency_obs.second;
+				if (epoch != _candidate_raw_phase_epoch.end())
+				{
+					const auto frequency_epoch = epoch->second.find(frequency_obs.first);
+					if (frequency_epoch != epoch->second.end())
+						_last_raw_phase_epoch[candidate.first][frequency_obs.first] =
+							frequency_epoch->second;
+				}
+			}
 		}
 	}
 
@@ -4531,12 +4603,38 @@ void gfgomsf::t_gpvtfgo::_commit_ppp_cycle_slips()
 				return sat.first == sat_name;
 			});
 
-		if (active != active_sats.end() &&
+		if (_observ == OBSCOMBIN::RAW_ALL)
+		{
+			auto pending = _pending_raw_slips.find(sat_name);
+			if (active != active_sats.end() && pending != _pending_raw_slips.end())
+			{
+				for (auto frequency = pending->second.begin();
+					 frequency != pending->second.end();)
+				{
+					const bool installed = std::any_of(
+						_vRAW_msg[_rover_count].begin(), _vRAW_msg[_rover_count].end(),
+						[&sat_name, &frequency](const RAWEquMsg &message)
+						{
+							return message.obs_type == GOBSTYPE::TYPE_L &&
+								message.sat_id == sat_name &&
+								message.freq == *frequency;
+						});
+					if (installed)
+						frequency = pending->second.erase(frequency);
+					else
+						++frequency;
+				}
+				if (pending->second.empty())
+					_pending_raw_slips.erase(pending);
+			}
+
+			if (_pending_raw_slips.find(sat_name) == _pending_raw_slips.end())
+				_pending_ppp_slips.erase(sat_name);
+		}
+		else if (active != active_sats.end() &&
 			_ppp_candidate_has_phase(sat_name))
 		{
 			_pending_ppp_slips.erase(sat_name);
-			if (_observ == OBSCOMBIN::RAW_ALL)
-				_pending_raw_slips.erase(sat_name);
 		}
 	}
 	_candidate_ppp_slips.clear();
@@ -5120,6 +5218,9 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
 
     const vector<int> margin_amb = _ambRAW_manager->getMarginAmb();
     const set<int> margin_amb_set(margin_amb.begin(), margin_amb.end());
+	const set<int> active_amb_set(
+		_ambRAW_manager->ambiguity_ids.begin(),
+		_ambRAW_manager->ambiguity_ids.end());
     vector<RawConstraintKey> absorbed_constraint_keys;
 	map<RawConstraintKey, RawFixedConstraint> next_prior_fixed_history;
 	bool carried_old_prior = false;
@@ -5140,21 +5241,27 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
 			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
 				if (address == &_ifb[slot][0])
 					return true;
-            for (int sat_id = 0; sat_id < NUM_OF_ARC; ++sat_id)
-            {
-                if (address == &_para_SION[0][sat_id])
-                    return true;
-            }
-            for (int amb_id = 0; amb_id < NUM_OF_ARC; ++amb_id)
-            {
-                if (address == _para_AMB_RAW[amb_id])
-                {
-                    const bool active = find(_ambRAW_manager->ambiguity_ids.begin(),
-                                             _ambRAW_manager->ambiguity_ids.end(), amb_id) !=
-                                         _ambRAW_manager->ambiguity_ids.end();
-                    return !active || margin_amb_set.count(amb_id) != 0;
-                }
-            }
+
+			const ParameterBlockKey key =
+				reinterpret_cast<ParameterBlockKey>(address);
+			const ParameterBlockKey sion_begin =
+				reinterpret_cast<ParameterBlockKey>(&_para_SION[0][0]);
+			const ParameterBlockKey sion_end = sion_begin + sizeof(_para_SION[0]);
+			if (key >= sion_begin && key < sion_end &&
+				(key - sion_begin) % sizeof(double) == 0)
+				return true;
+
+			const ParameterBlockKey amb_begin =
+				reinterpret_cast<ParameterBlockKey>(&_para_AMB_RAW[0][0]);
+			const ParameterBlockKey amb_end = amb_begin + sizeof(_para_AMB_RAW);
+			if (key >= amb_begin && key < amb_end &&
+				(key - amb_begin) % sizeof(_para_AMB_RAW[0]) == 0)
+			{
+				const int amb_id = static_cast<int>(
+					(key - amb_begin) / sizeof(_para_AMB_RAW[0]));
+				return active_amb_set.count(amb_id) == 0 ||
+					margin_amb_set.count(amb_id) != 0;
+			}
             return false;
         };
 
@@ -5466,10 +5573,25 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
     addr_shift[reinterpret_cast<ParameterBlockKey>(_para_ISB_QZS[1])] = _para_ISB_QZS[0];
 	for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
 		addr_shift[reinterpret_cast<ParameterBlockKey>(&_ifb[slot][1])] = &_ifb[slot][0];
-    for (int sat_id = 0; sat_id < NUM_OF_ARC; ++sat_id)
-        addr_shift[reinterpret_cast<ParameterBlockKey>(&_para_SION[1][sat_id])] = &_para_SION[0][sat_id];
-    for (int amb_id = 0; amb_id < NUM_OF_ARC; ++amb_id)
-        addr_shift[reinterpret_cast<ParameterBlockKey>(_para_AMB_RAW[amb_id])] = _para_AMB_RAW[amb_id];
+
+	// Shift only SION blocks which the newly formed prior actually retains.
+	// Ambiguity blocks keep stable addresses and are handled by the identity
+	// fallback below.  This avoids two NUM_OF_ARC-sized hash-map fills per
+	// epoch when the graph contains only a few dozen live states.
+	const ParameterBlockKey sion_node1_begin =
+		reinterpret_cast<ParameterBlockKey>(&_para_SION[1][0]);
+	const ParameterBlockKey sion_node1_end =
+		sion_node1_begin + sizeof(_para_SION[1]);
+	for (const auto &block : gnss_marginalization_info->parameter_block_idx)
+	{
+		const ParameterBlockKey address = block.first;
+		if (address < sion_node1_begin || address >= sion_node1_end ||
+			(address - sion_node1_begin) % sizeof(double) != 0)
+			continue;
+		const size_t sat_id = static_cast<size_t>(
+			(address - sion_node1_begin) / sizeof(double));
+		addr_shift[address] = &_para_SION[0][sat_id];
+	}
 
     // Every retained block must have an explicit address.  The fallback is
     // safe for current-window scalar blocks and prevents a null block from

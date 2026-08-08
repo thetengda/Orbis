@@ -1,4 +1,5 @@
 #include "gambRAW_manager.h"
+#include "gfgo/gfgo_para.h"
 
 #include <algorithm>
 #include <cmath>
@@ -122,6 +123,13 @@ namespace gfgomsf
             if (activeAmbiguity(sat_index, freq) >= 0)
                 continue;
 
+			// Parameter storage in t_gfgo is currently a fixed-size array.  Never
+			// publish an arc whose ID cannot be represented by that storage; the
+			// caller can then reject the observation explicitly instead of silently
+			// building a code-only graph with an out-of-range ambiguity address.
+			if (amb_index + 1 >= NUM_OF_ARC)
+				return added;
+
             ++amb_index;
             shared_ptr<t_gamb_per_ID> ambiguity(new t_gamb_per_ID(
                 make_pair(freq, band_it->second), gnss_system,
@@ -203,6 +211,9 @@ namespace gfgomsf
             return false;
 
         const int old_id = activeAmbiguity(sat_index, freq);
+
+		if (amb_index + 1 >= NUM_OF_ARC)
+			return false;
 
         ++amb_index;
         const int new_id = amb_index;

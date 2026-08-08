@@ -428,6 +428,8 @@ namespace gfgomsf
 		bool _apply_RAW_parameter_feedback();
 		bool _apply_RAW_constraint_feedback();
 		bool _rebuild_RAW_posterior_transactional(ceres::Problem &problem);
+		/** Whether the current RAW problem constrains at least one live ambiguity. */
+		bool _RAW_graph_has_live_fixed_ambiguity() const;
 		void _reset_RAW_feedback_problem();
 		/**
 		 * @brief Roll back a rejected pure-PPP candidate epoch
