@@ -11,8 +11,10 @@
 
 #include "gpvtfgo.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <queue>
 #include <stdexcept>
@@ -46,6 +48,19 @@ namespace
         default: return "NONE";
         }
     }
+
+    // Steady-clock stopwatch used to measure per-window FGO phase durations.
+    class FgoStopwatch
+    {
+        std::chrono::steady_clock::time_point _t0 = std::chrono::steady_clock::now();
+    public:
+        void reset() { _t0 = std::chrono::steady_clock::now(); }
+        double ms() const
+        {
+            return std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - _t0).count();
+        }
+    };
 }
 
 
@@ -293,6 +308,66 @@ void gfgomsf::t_gpvtfgo::_reset_RAW_feedback_problem()
 	_raw_float_search_parameters.delAllParam();
 	_raw_feedback_problem_ambiguities.clear();
 	_raw_feedback_constraint_residuals.clear();
+	_raw_problem_factors.clear();
+}
+
+void gfgomsf::t_gpvtfgo::_print_fgo_prof() const
+{
+	// Keep normal command output unchanged. Detailed timing is emitted only
+	// when the configured logger runs at DEBUG level.
+	if (_fgo_prof.windows == 0 || !_spdlog ||
+		!_spdlog->should_log(spdlog::level::debug))
+		return;
+	struct Row
+	{
+		const char *name;
+		const FgoPhaseStat *stat;
+	};
+	const Row rows[] = {
+		{"prep", &_fgo_prof.prep},
+		{"optimize", &_fgo_prof.opt},
+		{"amb", &_fgo_prof.amb},
+		{"marginalize", &_fgo_prof.marg},
+		{"slide", &_fgo_prof.slide},
+		{"raw.graph", &_fgo_prof.raw_graph},
+		{"raw.solve", &_fgo_prof.raw_solve},
+		{"  residual.eval", &_fgo_prof.raw_ceres_residual},
+		{"  jacobian.eval", &_fgo_prof.raw_ceres_jacobian},
+		{"  linear.solve", &_fgo_prof.raw_ceres_linear},
+		{"  preprocess", &_fgo_prof.raw_ceres_preprocess},
+		{"  postprocess", &_fgo_prof.raw_ceres_postprocess},
+		{"raw.posterior", &_fgo_prof.raw_posterior},
+		{"raw.cov.compute", &_fgo_prof.raw_cov_compute},
+		{"raw.cov.get", &_fgo_prof.raw_cov_get},
+		{"raw.equation", &_fgo_prof.raw_equation},
+		{"raw.outlier", &_fgo_prof.raw_outlier},
+	};
+	std::cerr << "\n[FGO] per-window phase timing over " << _fgo_prof.windows
+		<< " processed window(s):" << std::endl;
+	std::cerr << "  phase       | count |  avg ms |  min ms |  max ms |  total ms" << std::endl;
+	for (const Row &r : rows)
+	{
+		if (r.stat->count == 0)
+			continue;
+		std::cerr << "  " << std::left << std::setw(11) << r.name << std::right << "| "
+			<< std::setw(5) << r.stat->count << " | "
+			<< std::fixed << std::setprecision(2)
+			<< std::setw(7) << r.stat->avg_ms() << " | "
+			<< std::setw(7) << r.stat->min_ms << " | "
+			<< std::setw(7) << r.stat->max_ms << " | "
+			<< std::setw(8) << r.stat->total_ms << std::endl;
+	}
+	if (_fgo_prof.raw_parameters.count != 0)
+	{
+		std::cerr << "  RAW graph averages: "
+			<< std::fixed << std::setprecision(2)
+			<< static_cast<double>(_fgo_prof.raw_graph.count) / _fgo_prof.windows
+			<< " build/solve attempt(s) per window, "
+			<< _fgo_prof.raw_parameters.avg_ms() << " parameter scalar(s), "
+			<< _fgo_prof.raw_residuals.avg_ms() << " residual scalar(s), "
+			<< _fgo_prof.raw_solver_iterations.avg_ms() << " Ceres iteration(s) per solve"
+			<< std::endl;
+	}
 }
 
 int gfgomsf::t_gpvtfgo::processBatch(const t_gtime &beg_r, const t_gtime &end_r, bool prtOut)
@@ -391,6 +466,8 @@ int gfgomsf::t_gpvtfgo::processBatch(const t_gtime &beg_r, const t_gtime &end_r,
 
 
 	}
+	_print_fgo_prof();
+
 	_gmutex.unlock();
 	return 1;
 }
@@ -405,6 +482,11 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 	t_gtime runEpoch = _data.begin()->epoch();
 	_timeUpdate(runEpoch);
 	_epoch = runEpoch;
+
+	// ---- per-window FGO phase timing: prep / optimize / amb / marginalize / slide ----
+	FgoStopwatch _sw;
+	double _prep_ms = 0.0, _opt_ms = 0.0, _amb_ms = 0.0, _marg_ms = 0.0, _slide_ms = 0.0;
+	_sw.reset();
 
 
 	if (_reset_par > 0)
@@ -492,6 +574,8 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 	if (_isBase) {
 		_prepare_equ();
 	}
+	_prep_ms = _sw.ms();
+	_sw.reset();
 
 
 	if (_isBase)
@@ -509,6 +593,8 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 			return -1;
 		}
 	}
+	_opt_ms = _sw.ms();
+	_sw.reset();
 
 
 	// ambiguity resolution
@@ -560,6 +646,8 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 			_rollback_current_ppp_node();
 		return -1;
 	}
+	_amb_ms = _sw.ms();
+	_sw.reset();
 
 	// A retained Ceres problem owns a prior cost function that references the
 	// current marginalization object. Destroy it before replacing that prior.
@@ -575,10 +663,22 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 	}
 	if (!_isBase)
 		_commit_ppp_cycle_slips();
+	_marg_ms = _sw.ms();
+	_sw.reset();
 	//if (_rover_count == 1)
 	//	_initial_prior = false;
 
 	_slide_window();
+	_slide_ms = _sw.ms();
+
+	// record per-window FGO phase timing
+	_fgo_prof.windows++;
+	_fgo_prof.prep.add(_prep_ms);
+	_fgo_prof.opt.add(_opt_ms);
+	_fgo_prof.amb.add(_amb_ms);
+	_fgo_prof.marg.add(_marg_ms);
+	_fgo_prof.slide.add(_slide_ms);
+
 	if (!_isBase && _observ == OBSCOMBIN::RAW_ALL &&
 		_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE)
 		return _graph_ambiguity_fixed ? 1 : 0;
@@ -2642,23 +2742,36 @@ int gfgomsf::t_gpvtfgo::_optimization()
 ceres::Solver::Options gfgomsf::t_gpvtfgo::_ceres_solver_options() const
 {
     ceres::Solver::Options options;
-    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    // options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     // Sparse factorization library preference: SuiteSparse (UMFPACK) first,
     // Eigen's built-in sparse solver as fallback, then a dense solve when the
     // Ceres build has neither (vcpkg features ceres[suitesparse,eigensparse]).
-    if (ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::SUITE_SPARSE))
-        options.sparse_linear_algebra_library_type = ceres::SUITE_SPARSE;
-    else if (ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::EIGEN_SPARSE))
-        options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
-    else
+    // if (ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::SUITE_SPARSE))
+    //     options.sparse_linear_algebra_library_type = ceres::SUITE_SPARSE;
+    // else if (ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::EIGEN_SPARSE))
+    //     options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+    // else
+    // {
+    //     options.linear_solver_type = ceres::DENSE_QR;
+    //     if (_spdlog)
+    //         SPDLOG_LOGGER_WARN(_spdlog,
+    //             "No sparse linear algebra library in this Ceres build; the GNSS FGO graph will fall back to DENSE_QR");
+    // }
+    // t_gprecisebiasFGO owns mutable observation-model scratch buffers and
+    // serializes their use.  Extra Ceres workers therefore contend on one
+    // mutex and were measured to increase RAW solve time substantially.
+    // Keep the configuration value for non-RAW graphs, but use the
+    // reproducible fast path for the current RAW implementation.
+    const int requested_threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
+    options.num_threads = _observ == OBSCOMBIN::RAW_ALL ? 1 : requested_threads;
+    if (_observ == OBSCOMBIN::RAW_ALL && requested_threads > 1 &&
+        !_raw_thread_warning_logged && _spdlog)
     {
-        options.linear_solver_type = ceres::DENSE_QR;
-        if (_spdlog)
-            SPDLOG_LOGGER_WARN(_spdlog,
-                "No sparse linear algebra library in this Ceres build; the GNSS FGO graph will fall back to DENSE_QR");
+        _spdlog->warn(
+            "PPP RAW FGO uses one Ceres worker because the observation model has shared mutable state; requested gnss_num_threads={}",
+            requested_threads);
+        _raw_thread_warning_logged = true;
     }
-    const int threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
-    options.num_threads = threads;
     return options;
 }
 
@@ -2667,7 +2780,8 @@ bool gfgomsf::t_gpvtfgo::_solve_PPP_RAW_problem(
 {
     ceres::Solver::Options options = _ceres_solver_options();
     options.max_num_iterations = 10;
-    options.trust_region_strategy_type = ceres::DOGLEG;
+    // Keep Ceres' default Levenberg-Marquardt strategy. DOGLEG reduced the
+    // cost of one solve but caused substantially more RAW outlier rebuilds.
     ceres::Solve(options, &problem, &summary);
 
     const bool usable = summary.termination_type != ceres::FAILURE &&
@@ -3271,12 +3385,15 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
     int count = 0;
     bool iter_flag = false;
     pair<string, int> outlier = make_pair(" ", -1);
+	FgoStopwatch raw_prof_sw;
 
     // Rebuild and re-solve the window until outlier rejection converges
     // (the last rejected observation is re-fed into _remove_outlier_sat).
     do
     {
         ++count;
+		_raw_problem_factors.clear();
+		raw_prof_sw.reset();
         // Drop the previous iteration's outlier from the observation set.
         if (!_remove_outlier_sat(outlier))
         {
@@ -3463,60 +3580,99 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
                 if (!is_gps && !is_gal && !is_bds && !is_glo && !is_qzs)
                     continue;
 
+                ceres::CostFunction *measurement_cost = nullptr;
+                ceres::LossFunction *measurement_loss = nullptr;
+                vector<double *> measurement_blocks;
                 if (message.obs_type == TYPE_C)
                 {
                     if (is_gps)
                     {
-                        problem.AddResidualBlock(new PseudorangeRAWFactor(message, params_temp, _gbias_model),
-                                                 loss_function, _para_CRD[i], _para_CLK[i], _para_TRP[i],
-                                                 &_para_SION[i][sat_id]);
+                        measurement_cost = new PseudorangeRAWFactor(
+                            message, params_temp, _gbias_model);
+                        measurement_blocks = {_para_CRD[i], _para_CLK[i],
+                                              _para_TRP[i], &_para_SION[i][sat_id]};
                     }
                     else
                     {
                         double *isb = is_gal ? _para_ISB_GAL[i] :
 						(is_bds ? _para_ISB_BDS[i] :
 						 (is_glo ? _para_ISB_GLO[i] : _para_ISB_QZS[i]));
-                        problem.AddResidualBlock(new MultiPseudorangeRAWFactor(message, params_temp, _gbias_model),
-                                                 loss_function, _para_CRD[i], _para_CLK[i], _para_TRP[i],
-                                                 &_para_SION[i][sat_id], isb);
+                        measurement_cost = new MultiPseudorangeRAWFactor(
+                            message, params_temp, _gbias_model);
+                        measurement_blocks = {_para_CRD[i], _para_CLK[i],
+                                              _para_TRP[i], &_para_SION[i][sat_id], isb};
                     }
+                    measurement_loss = loss_function;
                 }
                 else if (message.obs_type == TYPE_L && message.amb_index >= 0 &&
                          raw_ambiguities.count(message.amb_index))
                 {
                     if (is_gps)
                     {
-                        problem.AddResidualBlock(new CarrierphaseRAWFactor(message, params_temp, _gbias_model),
-                                                 loss_function_cp, _para_CRD[i], _para_CLK[i], _para_TRP[i],
-                                                 &_para_SION[i][sat_id], _para_AMB_RAW[message.amb_index]);
+                        measurement_cost = new CarrierphaseRAWFactor(
+                            message, params_temp, _gbias_model);
+                        measurement_blocks = {_para_CRD[i], _para_CLK[i],
+                                              _para_TRP[i], &_para_SION[i][sat_id],
+                                              _para_AMB_RAW[message.amb_index]};
                     }
                     else
                     {
                         double *isb = is_gal ? _para_ISB_GAL[i] :
 						(is_bds ? _para_ISB_BDS[i] :
 						 (is_glo ? _para_ISB_GLO[i] : _para_ISB_QZS[i]));
-                        problem.AddResidualBlock(new MultiCarrierphaseRAWFactor(message, params_temp, _gbias_model),
-                                                 loss_function_cp, _para_CRD[i], _para_CLK[i], _para_TRP[i],
-                                                 &_para_SION[i][sat_id], isb, _para_AMB_RAW[message.amb_index]);
+                        measurement_cost = new MultiCarrierphaseRAWFactor(
+                            message, params_temp, _gbias_model);
+                        measurement_blocks = {_para_CRD[i], _para_CLK[i],
+                                              _para_TRP[i], &_para_SION[i][sat_id],
+                                              isb, _para_AMB_RAW[message.amb_index]};
                     }
+                    measurement_loss = loss_function_cp;
+                }
+                if (measurement_cost)
+                {
+                    problem.AddResidualBlock(measurement_cost, measurement_loss,
+                                             measurement_blocks);
+                    _raw_problem_factors[&message] = {
+                        measurement_cost, measurement_loss, measurement_blocks};
                 }
             }
         }
 
         // Solve the current float window and build its posterior; expected-failure
         // paths invalidate the shared posterior so callers fall back cleanly.
+		_fgo_prof.raw_graph.add(raw_prof_sw.ms());
+		_fgo_prof.raw_parameters.add(static_cast<double>(problem.NumParameters()));
+		_fgo_prof.raw_residuals.add(static_cast<double>(problem.NumResiduals()));
         ceres::Solver::Summary summary;
+		raw_prof_sw.reset();
         if (!_solve_PPP_RAW_problem(problem, summary))
         {
             if (_last_gnss_info)
                 _last_gnss_info->valid = false;
             return -1;
         }
+		_fgo_prof.raw_solve.add(raw_prof_sw.ms());
+		_fgo_prof.raw_ceres_residual.add(
+			1000.0 * summary.residual_evaluation_time_in_seconds);
+		_fgo_prof.raw_ceres_jacobian.add(
+			1000.0 * summary.jacobian_evaluation_time_in_seconds);
+		_fgo_prof.raw_ceres_linear.add(
+			1000.0 * summary.linear_solver_time_in_seconds);
+		_fgo_prof.raw_ceres_preprocess.add(
+			1000.0 * summary.preprocessor_time_in_seconds);
+		_fgo_prof.raw_ceres_postprocess.add(
+			1000.0 * summary.postprocessor_time_in_seconds);
+		_fgo_prof.raw_solver_iterations.add(
+			static_cast<double>(summary.iterations.size()));
 
         // Posteriori test (per-observation residuals/variance) and outlier detection:
         // if any observation is flagged, loop again with it dropped.
+		raw_prof_sw.reset();
         _posteriori_test_PPP_RAW(problem);
+		_fgo_prof.raw_posterior.add(raw_prof_sw.ms());
+		raw_prof_sw.reset();
         iter_flag = _gobs_outlier_detection(outlier) >= 0;
+		_fgo_prof.raw_outlier.add(raw_prof_sw.ms());
         if (!iter_flag && _last_gnss_info && _last_gnss_info->valid &&
             _ambiguity_feedback_mode == AMB_FEEDBACK_MODE::CONSTRAINT)
         {
@@ -5338,6 +5494,7 @@ void gfgomsf::t_gpvtfgo::_posteriori_test(ceres::Problem& problem)
 
 void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
 {
+	FgoStopwatch posterior_prof_sw;
     _all_para_win.delAllParam();
     _parameter_blocks.clear();
     _raw_obs_index.clear();
@@ -5345,8 +5502,6 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
     _raw_posterior_scalar_ambiguity_ids.clear();
 
     GNSSInfo *gnss_info = new GNSSInfo();
-    ceres::LossFunction *loss_function = new ceres::HuberLoss(_loss_func_value);
-    ceres::LossFunction *loss_function_cp = new ceres::HuberLoss(_loss_func_value);
     map<ParameterBlockKey, vector<t_gpar>> descriptors;
     map<ParameterBlockKey, double *> parameter_addresses;
     map<ParameterBlockKey, int> ambiguity_block_ids;
@@ -5410,7 +5565,6 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
 
     for (int node = 0; node <= _rover_count; ++node)
     {
-        const t_gallpar params_temp(_para_window[node]);
         for (const auto &message : _vRAW_msg[node])
         {
             if (message.sat_global_id < 0 || message.sat_global_id >= NUM_OF_ARC)
@@ -5425,51 +5579,17 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
             if (!is_gps && !is_gal && !is_bds && !is_glo && !is_qzs)
                 continue;
 
-            ceres::CostFunction *cost = nullptr;
-            vector<double *> blocks;
-            if (message.obs_type == TYPE_C)
-            {
-                if (is_gps)
-                {
-                    cost = new PseudorangeRAWFactor(message, params_temp, _gbias_model);
-                    blocks = {_para_CRD[node], _para_CLK[node], _para_TRP[node],
-                              &_para_SION[node][message.sat_global_id]};
-                }
-                else
-                {
-                    double *isb = is_gal ? _para_ISB_GAL[node] :
-						(is_bds ? _para_ISB_BDS[node] :
-						 (is_glo ? _para_ISB_GLO[node] : _para_ISB_QZS[node]));
-                    cost = new MultiPseudorangeRAWFactor(message, params_temp, _gbias_model);
-                    blocks = {_para_CRD[node], _para_CLK[node], _para_TRP[node],
-                              &_para_SION[node][message.sat_global_id], isb};
-                }
-            }
-            else if (message.obs_type == TYPE_L && message.amb_index >= 0 && message.amb_index < NUM_OF_ARC)
-            {
-                if (is_gps)
-                {
-                    cost = new CarrierphaseRAWFactor(message, params_temp, _gbias_model);
-                    blocks = {_para_CRD[node], _para_CLK[node], _para_TRP[node],
-                              &_para_SION[node][message.sat_global_id], _para_AMB_RAW[message.amb_index]};
-                }
-                else
-                {
-                    double *isb = is_gal ? _para_ISB_GAL[node] :
-						(is_bds ? _para_ISB_BDS[node] :
-						 (is_glo ? _para_ISB_GLO[node] : _para_ISB_QZS[node]));
-                    cost = new MultiCarrierphaseRAWFactor(message, params_temp, _gbias_model);
-                    blocks = {_para_CRD[node], _para_CLK[node], _para_TRP[node],
-                              &_para_SION[node][message.sat_global_id], isb,
-                              _para_AMB_RAW[message.amb_index]};
-                }
-            }
-            if (!cost)
+            const auto problem_factor = _raw_problem_factors.find(&message);
+            if (problem_factor == _raw_problem_factors.end() ||
+                !problem_factor->second.cost)
                 continue;
 
+            ceres::CostFunction *cost = problem_factor->second.cost;
+            const vector<double *> &blocks = problem_factor->second.blocks;
+
             GNSSResidualBlockInfo *residual_block = new GNSSResidualBlockInfo(
-                cost, message.obs_type == TYPE_L ? loss_function_cp : loss_function,
-                blocks);
+                cost, problem_factor->second.loss, blocks);
+            residual_block->owns_cost_function = false;
             register_parameter_addresses(blocks);
             gnss_info->addResidualBlockInfo(residual_block, map<ParameterBlockKey, vector<int>>());
 
@@ -5649,15 +5769,20 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
         options_co.algorithm_type = ceres::SPARSE_QR;
         options_co.apply_loss_function = true;
         ceres::Covariance covariance(options_co);
+		posterior_prof_sw.reset();
         covariance_ok = covariance.Compute(covariance_blocks, &problem);
+		_fgo_prof.raw_cov_compute.add(posterior_prof_sw.ms());
         if (covariance_ok)
         {
             covariance_matrix = Eigen::MatrixXd::Zero(column, column);
+			posterior_prof_sw.reset();
             covariance.GetCovarianceMatrix(covariance_blocks,
                                            covariance_matrix.data());
+			_fgo_prof.raw_cov_get.add(posterior_prof_sw.ms());
         }
     }
 
+	posterior_prof_sw.reset();
     if (covariance_ok)
         gnss_info->constructEqu_fromCeres(covariance_matrix);
     else
@@ -5671,6 +5796,7 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
                       "inconsistent; using the equation fallback for outlier normalization");
         gnss_info->constructEqu_fromCeres(Eigen::MatrixXd());
     }
+	_fgo_prof.raw_equation.add(posterior_prof_sw.ms());
 
     if (_last_gnss_info)
         delete _last_gnss_info;
@@ -5928,7 +6054,7 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP(ceres::Problem& problem)
     total_para_size = total_para_size + amb_size + 1;
     //construct variances by ceres solver
     ceres::Covariance::Options options_co;
-    options_co.algorithm_type = ceres::SPARSE_QR;
+    // options_co.algorithm_type = ceres::SPARSE_QR;
     //options_co.algorithm_type = ceres::DENSE_SVD;
     options_co.apply_loss_function = false; //optional, true or false is depended on the reliability of covariance
     ceres::Covariance covariance(options_co);

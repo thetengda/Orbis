@@ -35,6 +35,7 @@
 #include "gfactor/random_walk_factor.h"
 #include "gset/gsetfgo.h"
 
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -96,6 +97,13 @@ namespace gfgomsf
 			int sat_global_id = -1;
 			int amb_index = -1;
 			int node = -1;
+		};
+
+		struct RawProblemFactor
+		{
+			ceres::CostFunction *cost = nullptr;
+			ceres::LossFunction *loss = nullptr;
+			vector<double *> blocks;
 		};
 
 		struct RawFixedConstraint
@@ -166,6 +174,7 @@ namespace gfgomsf
 
 		vector<pair<pair<string, int>, pair<FREQ_SEQ, GOBSTYPE>>> _gnss_obs_index;
 		vector<RawObsIndex> _raw_obs_index;
+		std::map<const RAWEquMsg *, RawProblemFactor> _raw_problem_factors;
 		int _raw_outlier_index = -1;
 		std::vector<PseudorangeDDFactor*> window_pseudo_factors;
 		std::vector<CarrierphaseDDFactor*> window_carrierphase_dd_factors;
@@ -376,8 +385,9 @@ namespace gfgomsf
 		 * @brief Build Ceres solver options for a GNSS graph solve.
 		 *
 		 * Uses SPARSE_NORMAL_CHOLESKY when a sparse backend is available
-		 * (falling back to DENSE_QR) and honors the configured thread count for
-		 * both residual evaluation and the sparse linear-algebra factorization.
+		 * (falling back to DENSE_QR). Non-RAW graphs honor the configured thread
+		 * count; RAW is pinned to one worker while its observation model shares
+		 * mutable scratch state.
 		 */
 		ceres::Solver::Options _ceres_solver_options() const;
 		void _add_RAW_fixed_constraints(ceres::Problem &problem,
@@ -447,6 +457,56 @@ namespace gfgomsf
 		//void _posteriori_test_PPP(ceres::Problem& problem);
 		void _posteriori_test_PPP(ceres::Problem & problem);
 		void _posteriori_test_PPP_RAW(ceres::Problem & problem);
+
+		/** @brief aggregated per-window timing of a single FGO phase (milliseconds). */
+		struct FgoPhaseStat
+		{
+			size_t count = 0;
+			double total_ms = 0.0;
+			double min_ms = (std::numeric_limits<double>::max)();
+			double max_ms = 0.0;
+
+			void add(double ms)
+			{
+				++count;
+				total_ms += ms;
+				if (ms < min_ms) min_ms = ms;
+				if (ms > max_ms) max_ms = ms;
+			}
+			double avg_ms() const { return count ? total_ms / count : 0.0; }
+		};
+
+		/** @brief per-window FGO phase timing statistics. */
+		struct FgoWindowProf
+		{
+			size_t windows = 0;        // successfully processed windows
+			FgoPhaseStat prep;         // data preparation / observation combination
+			FgoPhaseStat opt;          // ceres optimization
+			FgoPhaseStat amb;          // ambiguity resolution
+			FgoPhaseStat marg;         // marginalization
+			FgoPhaseStat slide;        // window slide
+			// RAW optimization detail. Counts may exceed windows when outlier
+			// rejection rebuilds and resolves the same window.
+			FgoPhaseStat raw_graph;
+			FgoPhaseStat raw_solve;
+			FgoPhaseStat raw_ceres_residual;
+			FgoPhaseStat raw_ceres_jacobian;
+			FgoPhaseStat raw_ceres_linear;
+			FgoPhaseStat raw_ceres_preprocess;
+			FgoPhaseStat raw_ceres_postprocess;
+			FgoPhaseStat raw_posterior;
+			FgoPhaseStat raw_cov_compute;
+			FgoPhaseStat raw_cov_get;
+			FgoPhaseStat raw_equation;
+			FgoPhaseStat raw_outlier;
+			FgoPhaseStat raw_parameters;
+			FgoPhaseStat raw_residuals;
+			FgoPhaseStat raw_solver_iterations;
+		};
+		FgoWindowProf _fgo_prof;
+		mutable bool _raw_thread_warning_logged = false;
+		/** @brief print aggregated per-window FGO phase timing statistics. */
+		void _print_fgo_prof() const;
 	};
 }
 #endif
