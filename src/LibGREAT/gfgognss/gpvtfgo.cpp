@@ -749,6 +749,7 @@ void gfgomsf::t_gpvtfgo::clearWindow()
 		_RAW_msg.clear();
 		_vRAW_msg.clear();
 		_raw_obs_index.clear();
+		_raw_code_outlier_batch.clear();
 		_raw_outlier_index = -1;
 	}
 	if (_isBase)
@@ -1912,6 +1913,14 @@ int gfgomsf::t_gpvtfgo::_combine_RAW()
                 message.sat_id = sat_data.sat();
                 message.sat_global_id = sat_global_id;
                 message.ion_id = t_gambRAW_manager::ionosphereKey(message.sat_id, _rover_count);
+				if (_grec)
+				{
+					const t_gtriple receiver_eccentricity =
+						_grec->eccxyz(sat_data.epoch());
+					for (int coordinate = 0; coordinate < 3; ++coordinate)
+						message.receiver_eccentricity[coordinate] =
+							receiver_eccentricity[coordinate];
+				}
                 if (type == TYPE_L)
                 {
 					if (correct_gps_ifcb && system == GSYS::GPS && freq == FREQ_3)
@@ -2403,6 +2412,44 @@ bool gfgomsf::t_gpvtfgo::_remove_outlier_sat(const pair<string, int>& outlier)
 
     if (!_isBase && _observ == OBSCOMBIN::RAW_ALL && outlier.first != " ")
     {
+		// A RAW posterior can flag many code observations from the same
+		// receiver-code family (for example GPS C1W with an OSB product).  Each
+		// of these equations is independent and, when carrier phase for the same
+		// satellite remains in the node, removing it cannot end the ambiguity
+		// arc.  Reject that safe subset in one pass instead of rebuilding and
+		// solving the complete graph once per code observation.
+		if (!_raw_code_outlier_batch.empty())
+		{
+			size_t removed = 0;
+			for (const RawObsIndex &raw_obs : _raw_code_outlier_batch)
+			{
+				if (raw_obs.obs_type != TYPE_C || raw_obs.node < 0 ||
+					raw_obs.node >= static_cast<int>(_vRAW_msg.size()))
+					continue;
+				auto &raw_epoch = _vRAW_msg[raw_obs.node];
+				const size_t old_size = raw_epoch.size();
+				raw_epoch.erase(remove_if(raw_epoch.begin(), raw_epoch.end(),
+					[&raw_obs](const RAWEquMsg &message)
+					{
+						return message.sat_global_id == raw_obs.sat_global_id &&
+							message.obs_type == TYPE_C && message.obs == raw_obs.obs &&
+							message.freq == raw_obs.freq;
+					}), raw_epoch.end());
+				removed += old_size - raw_epoch.size();
+			}
+			_raw_code_outlier_batch.clear();
+			_raw_outlier_index = -1;
+			if (removed > 0)
+			{
+				_RAW_msg = _vRAW_msg[_rover_count];
+				if (_last_gnss_info)
+					_last_gnss_info->valid = false;
+				if (_spdlog)
+					_spdlog->info("PPP RAW rejected {} independent code outlier equation(s) in one graph rebuild", removed);
+				return true;
+			}
+		}
+
 		const int raw_index = _raw_outlier_index;
 		RawObsIndex raw_obs;
 		const bool has_raw_index =
@@ -3473,6 +3520,7 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 {
     _reset_RAW_feedback_problem();
     _removed_sats.clear();
+	_raw_code_outlier_batch.clear();
     t_tictoc fgo_gnss;
     int count = 0;
     bool iter_flag = false;
@@ -3873,8 +3921,23 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
         return -1;
     _double_to_vector();
     if (_spdlog)
+	{
         _spdlog->debug("PPP RAW FGO epoch {} solved in {} ms after {} iteration(s)",
                        _headers[_rover_count], fgo_gnss.toc(), count);
+		if (_spdlog->should_log(spdlog::level::debug))
+		{
+			static const char *ifb_names[RAW_IFB_COUNT] = {
+				"IFB_GPS", "IFB_GAL", "IFB_GAL_2", "IFB_GAL_3",
+				"IFB_BDS", "IFB_BDS_2", "IFB_BDS_3", "IFB_QZS"};
+			ostringstream values;
+			values << fixed << setprecision(6);
+			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+				if (!_lost_ifb[slot][_rover_count])
+					values << (values.tellp() > 0 ? " " : "")
+						   << ifb_names[slot] << "=" << _ifb[slot][_rover_count];
+			_spdlog->debug("PPP IFB state FGO {} {}", _epoch.str_ymdhms(), values.str());
+		}
+	}
     return 1;
 }
 
@@ -4444,6 +4507,7 @@ void gfgomsf::t_gpvtfgo::_rollback_current_ppp_node()
 	if (_observ == OBSCOMBIN::RAW_ALL)
 	{
 		_RAW_msg.clear();
+		_raw_code_outlier_batch.clear();
 		_raw_outlier_index = -1;
 		if (_vRAW_msg.size() > static_cast<size_t>(failed_rover))
 			_vRAW_msg.pop_back();
@@ -5389,6 +5453,7 @@ int gfgomsf::t_gpvtfgo::_gobs_outlier_detection(pair<string, int> & outlier)
 {
 	if (!_last_gnss_info || !_last_gnss_info->valid)
 	{
+		_raw_code_outlier_batch.clear();
 		_raw_outlier_index = -1;
 		outlier = make_pair(" ", -1);
 		return -1;
@@ -5396,14 +5461,37 @@ int gfgomsf::t_gpvtfgo::_gobs_outlier_detection(pair<string, int> & outlier)
 
 	if (!_isBase && _observ == OBSCOMBIN::RAW_ALL)
 	{
+		_raw_code_outlier_batch.clear();
 		int idx = -1;
 		double max_norm = 0.0;
 		for (int i = 0; i < _last_gnss_info->v_norm.rows(); ++i)
 		{
-			if (fabs(_last_gnss_info->v_norm(i)) > max_norm &&
-				fabs(_last_gnss_info->v_norm(i)) > _max_res_norm)
+			const double normalized_residual = fabs(_last_gnss_info->v_norm(i));
+			if (normalized_residual <= _max_res_norm ||
+				i >= static_cast<int>(_raw_obs_index.size()))
+				continue;
+
+			const RawObsIndex &candidate = _raw_obs_index[i];
+			if (_rover_count > 0 && candidate.obs_type == TYPE_C && candidate.node >= 0 &&
+				candidate.node < static_cast<int>(_vRAW_msg.size()))
 			{
-				max_norm = fabs(_last_gnss_info->v_norm(i));
+				// Only batch a code equation while carrier phase from the same
+				// satellite remains in this node.  This guarantees that batching
+				// cannot change satellite membership or terminate an ambiguity arc.
+				const auto &raw_epoch = _vRAW_msg[candidate.node];
+				const bool keeps_phase = any_of(raw_epoch.begin(), raw_epoch.end(),
+					[&candidate](const RAWEquMsg &message)
+					{
+						return message.sat_global_id == candidate.sat_global_id &&
+							message.obs_type == TYPE_L;
+					});
+				if (keeps_phase)
+					_raw_code_outlier_batch.push_back(candidate);
+			}
+
+			if (normalized_residual > max_norm)
+			{
+				max_norm = normalized_residual;
 				idx = i;
 			}
 		}
@@ -5421,8 +5509,13 @@ int gfgomsf::t_gpvtfgo::_gobs_outlier_detection(pair<string, int> & outlier)
 				[&outlier](const pair<string, int> &item) { return item.second == outlier.second; }) == _removed_sats.end())
 			_removed_sats.push_back(outlier);
 		if (_spdlog)
+		{
 			_spdlog->warn("PPP RAW outlier {} {} freq {} normalized residual {:.3f}",
 				obs.sat, gobs2str(obs.obs), static_cast<int>(obs.freq), max_norm);
+			if (_raw_code_outlier_batch.size() > 1)
+				_spdlog->info("PPP RAW scheduled {} independent code outlier equation(s) for batched rejection",
+					_raw_code_outlier_batch.size());
+		}
 		return idx;
 	}
 

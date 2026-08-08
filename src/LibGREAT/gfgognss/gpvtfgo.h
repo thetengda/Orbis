@@ -187,6 +187,11 @@ namespace gfgomsf
 
 		vector<pair<pair<string, int>, pair<FREQ_SEQ, GOBSTYPE>>> _gnss_obs_index;
 		vector<RawObsIndex> _raw_obs_index;
+		// Code outliers that can be removed without dropping the satellite's
+		// carrier-phase arc.  They are rejected together before the next RAW
+		// graph rebuild so one bad receiver-code family does not trigger a full
+		// Ceres solve for every individual observation.
+		vector<RawObsIndex> _raw_code_outlier_batch;
 		std::map<const RAWEquMsg *, RawProblemFactor> _raw_problem_factors;
 		int _raw_outlier_index = -1;
 		std::vector<PseudorangeDDFactor*> window_pseudo_factors;

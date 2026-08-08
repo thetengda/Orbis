@@ -127,9 +127,16 @@ namespace raw_factor_detail
         const string site = message.site.empty() ? message.satdata.site() : message.site;
         const string sat = message.sat_id.empty() ? message.satdata.sat() : message.sat_id;
 
-        setOrAdd(params, site, par_type::CRD_X, "", out.crd[0]);
-        setOrAdd(params, site, par_type::CRD_Y, "", out.crd[1]);
-        setOrAdd(params, site, par_type::CRD_Z, "", out.crd[2]);
+		// t_gprecisebiasFGO runs with estimator=FGO and therefore adds the
+		// receiver eccentricity in _apply_rec_RTK().  Convert the graph's ARP
+		// coordinate to its marker-coordinate input; the offset is constant, so
+		// the coordinate Jacobian remains unchanged.
+        setOrAdd(params, site, par_type::CRD_X, "",
+				 out.crd[0] - message.receiver_eccentricity[0]);
+        setOrAdd(params, site, par_type::CRD_Y, "",
+				 out.crd[1] - message.receiver_eccentricity[1]);
+        setOrAdd(params, site, par_type::CRD_Z, "",
+				 out.crd[2] - message.receiver_eccentricity[2]);
         setOrAdd(params, site, par_type::CLK, "", out.clk);
         setOrAdd(params, site, par_type::TRP, "", out.trp);
         setOrAdd(params, site, par_type::SION, sat, sion);

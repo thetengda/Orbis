@@ -1540,7 +1540,23 @@ int great::t_gpvtflt::_processEpoch(const t_gtime &runEpoch)
         _param[iPar].value(_param[iPar].value() + dx(_param[iPar].index));
     }
 
-    
+	if (_spdlog && _spdlog->should_log(spdlog::level::debug) && _frequency >= 3)
+	{
+		ostringstream values;
+		values << fixed << setprecision(6);
+		for (unsigned int iPar = 0; iPar < _param.parNumber(); ++iPar)
+		{
+			const par_type type = _param[iPar].parType;
+			if (type != par_type::IFB_GPS && type != par_type::IFB_GAL &&
+				type != par_type::IFB_GAL_2 && type != par_type::IFB_GAL_3 &&
+				type != par_type::IFB_BDS && type != par_type::IFB_BDS_2 &&
+				type != par_type::IFB_BDS_3 && type != par_type::IFB_QZS)
+				continue;
+			values << (values.tellp() > 0 ? " " : "")
+				   << _param[iPar].str_type() << "=" << _param[iPar].value();
+		}
+		_spdlog->debug("PPP IFB state FLT {} {}", _epoch.str_ymdhms(), values.str());
+	}
 
 
 

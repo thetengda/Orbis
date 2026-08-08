@@ -29,6 +29,12 @@ namespace gfgo
         string sat_id;
         string amb_id;
         string ion_id;
+		// The PPP filter and the RAW graph store estimated receiver coordinates
+		// at the antenna reference point (ARP).  The non-FLT precise-bias model
+		// expects a marker coordinate and adds the receiver eccentricity itself,
+		// so each factor freezes the epoch-specific marker-to-ARP offset and
+		// removes it from the graph state before calling that model.
+		double receiver_eccentricity[3] = {0.0, 0.0, 0.0};
         // Observation-domain correction which is not part of the generic
         // precise-bias equation (for example the GPS L5 IFCB correction).
         // Store the value in the message so optimization, posterior testing
