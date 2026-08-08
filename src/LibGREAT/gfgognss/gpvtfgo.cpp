@@ -3020,10 +3020,12 @@ bool gfgomsf::t_gpvtfgo::_write_RAW_fixed_solution(
 bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
     const std::vector<great::FixedAmbiguityConstraint> &source,
     std::map<RawConstraintKey, RawFixedConstraint> &pending,
-    std::map<RawConstraintKey, RawFixedConstraint> &candidates)
+    std::map<RawConstraintKey, RawFixedConstraint> &candidates,
+    std::set<RawConstraintKey> &obsolete)
 {
     pending.clear();
 	candidates.clear();
+	obsolete.clear();
     const size_t parameter_count = _all_para_win.parNumber();
     if (source.empty() || parameter_count == 0 ||
         _raw_posterior_scalar_addresses.size() != parameter_count ||
@@ -3186,31 +3188,73 @@ bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
         candidates[key] = constraint;
     }
 
-    // Validate only old equations that remain installed. A key changed by
-    // this batch is removed and replaced below on the retained Ceres problem.
+	// A reference-satellite change can express the same fixed component with a
+	// different spanning tree.  Treat old explicit edges inside a component
+	// fully covered by this epoch's candidate equations as replaceable.  Edges
+	// across candidate components remain installed, and prior-carried edges are
+	// never removable here.
+	map<int, set<int>> candidate_adjacency;
+	for (const auto &entry : candidates)
+	{
+		const RawFixedConstraint &constraint = entry.second;
+		candidate_adjacency[constraint.amb_a].insert(constraint.amb_b);
+		candidate_adjacency[constraint.amb_b].insert(constraint.amb_a);
+	}
+	auto connected_in = [](const map<int, set<int>> &adjacency,
+	                       int start, int goal) -> bool
+	{
+		if (start == goal)
+			return true;
+		set<int> visited;
+		queue<int> todo;
+		visited.insert(start);
+		todo.push(start);
+		while (!todo.empty())
+		{
+			const int node = todo.front();
+			todo.pop();
+			const auto neighbours = adjacency.find(node);
+			if (neighbours == adjacency.end())
+				continue;
+			for (int next : neighbours->second)
+			{
+				if (next == goal)
+					return true;
+				if (visited.insert(next).second)
+					todo.push(next);
+			}
+		}
+		return false;
+	};
+
+	for (const auto &entry : _raw_fixed_constraints)
+	{
+		const auto replacement = candidates.find(entry.first);
+		if (replacement != candidates.end() &&
+			same_constraint(entry.second, replacement->second))
+			continue;
+		if (_raw_feedback_problem_ambiguities.count(entry.second.amb_a) > 0 &&
+			_raw_feedback_problem_ambiguities.count(entry.second.amb_b) > 0 &&
+			connected_in(candidate_adjacency,
+			             entry.second.amb_a, entry.second.amb_b))
+			obsolete.insert(entry.first);
+	}
+
+	// Old equations outside the replaced components must still be installed in
+	// the retained Ceres problem.  Do not require the unconstrained conditional
+	// solution to satisfy them before re-optimization: a partial fixed batch can
+	// legitimately leave their other endpoints at float values.  The solved
+	// transaction validates both the retained equations and every current
+	// candidate before it is committed.
     for (const auto &entry : _raw_fixed_constraints)
     {
         const RawFixedConstraint &constraint = entry.second;
+		if (obsolete.count(entry.first) > 0)
+			continue;
         if (_raw_feedback_problem_ambiguities.count(constraint.amb_a) == 0 ||
             _raw_feedback_problem_ambiguities.count(constraint.amb_b) == 0)
             continue;
-        const auto replacement = candidates.find(entry.first);
-        if (replacement != candidates.end() &&
-            !same_constraint(constraint, replacement->second))
-            continue;
         if (_raw_feedback_constraint_residuals.count(entry.first) == 0)
-            return false;
-        const auto value_a = fixed_ambiguity_values.find(constraint.amb_a);
-        const auto value_b = fixed_ambiguity_values.find(constraint.amb_b);
-        if (value_a == fixed_ambiguity_values.end() ||
-            value_b == fixed_ambiguity_values.end())
-            return false;
-        const double residual = constraint.coefficient_a * value_a->second +
-                                constraint.coefficient_b * value_b->second -
-                                constraint.target;
-        const double tolerance = (std::max)(
-            1e-6, 10.0 / constraint.sqrt_information);
-        if (!std::isfinite(residual) || std::fabs(residual) > tolerance)
             return false;
     }
 
@@ -3223,7 +3267,8 @@ bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
     for (const auto &entry : _raw_prior_fixed_constraint_history)
         add_history_edge(entry.second);
     for (const auto &entry : _raw_fixed_constraints)
-        add_history_edge(entry.second);
+		if (obsolete.count(entry.first) == 0)
+			add_history_edge(entry.second);
 
     auto connected = [&adjacency](int start, int goal) -> bool
     {
@@ -3257,10 +3302,9 @@ bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
         const RawFixedConstraint &constraint = candidate.second;
 
         const auto existing = _raw_fixed_constraints.find(candidate.first);
-        if (existing != _raw_fixed_constraints.end())
+        if (existing != _raw_fixed_constraints.end() &&
+			obsolete.count(candidate.first) == 0)
         {
-            if (!same_constraint(existing->second, constraint))
-                pending[key] = constraint;
             continue;
         }
 		const auto absorbed = _raw_prior_fixed_constraint_history.find(key);
@@ -3372,11 +3416,16 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
 
     map<RawConstraintKey, RawFixedConstraint> pending;
 	map<RawConstraintKey, RawFixedConstraint> candidates;
+	set<RawConstraintKey> obsolete;
     if (!_translate_RAW_fixed_constraints(
-			_ambfix->fixedConstraints(), pending, candidates))
+			_ambfix->fixedConstraints(), pending, candidates, obsolete))
+	{
+		if (_spdlog)
+			_spdlog->warn("PPP RAW constraint translation rejected the current fixed candidate");
         return false;
+	}
 
-    if (pending.empty())
+    if (pending.empty() && obsolete.empty())
     {
         if (!_validate_RAW_constraint_values(candidates))
 			return false;
@@ -3400,25 +3449,28 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
     if (!_write_RAW_fixed_solution(_param_fixed))
         return false;
 
-    map<RawConstraintKey, RawFixedConstraint> replaced_constraints;
+    map<RawConstraintKey, RawFixedConstraint> removed_constraints;
     vector<RawConstraintKey> installed_keys;
     bool topology_ok = true;
+	for (const RawConstraintKey &key : obsolete)
+	{
+		const auto existing = _raw_fixed_constraints.find(key);
+		const auto residual = _raw_feedback_constraint_residuals.find(key);
+		if (existing == _raw_fixed_constraints.end() ||
+			residual == _raw_feedback_constraint_residuals.end())
+		{
+			topology_ok = false;
+			break;
+		}
+		removed_constraints[key] = existing->second;
+		problem.RemoveResidualBlock(residual->second);
+		_raw_feedback_constraint_residuals.erase(residual);
+	}
+
     for (const auto &entry : pending)
     {
-        const auto existing = _raw_fixed_constraints.find(entry.first);
-        if (existing != _raw_fixed_constraints.end())
-        {
-            const auto residual = _raw_feedback_constraint_residuals.find(entry.first);
-            if (residual == _raw_feedback_constraint_residuals.end())
-            {
-                topology_ok = false;
-                break;
-            }
-            replaced_constraints[entry.first] = existing->second;
-            problem.RemoveResidualBlock(residual->second);
-            _raw_feedback_constraint_residuals.erase(residual);
-        }
-
+        if (!topology_ok)
+            break;
         const RawFixedConstraint &constraint = entry.second;
         double *address_a = _para_AMB_RAW[constraint.amb_a];
         double *address_b = _para_AMB_RAW[constraint.amb_b];
@@ -3450,7 +3502,7 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
                 _raw_feedback_constraint_residuals.erase(residual);
             }
         }
-        for (const auto &entry : replaced_constraints)
+        for (const auto &entry : removed_constraints)
         {
             const RawFixedConstraint &constraint = entry.second;
             _raw_feedback_constraint_residuals[entry.first] =
@@ -3476,17 +3528,29 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
     ceres::Solver::Summary summary;
     map<RawConstraintKey, RawFixedConstraint> expected_constraints =
 		_raw_fixed_constraints;
+	for (const RawConstraintKey &key : obsolete)
+		expected_constraints.erase(key);
 	for (const auto &entry : pending)
 		expected_constraints[entry.first] = entry.second;
-    if (!_solve_PPP_RAW_problem(problem, summary) ||
-		!_validate_RAW_constraint_values(expected_constraints) ||
-		!_validate_RAW_constraint_values(candidates) ||
-		!_rebuild_RAW_posterior_transactional(problem))
+	const char *failure_stage = nullptr;
+	if (!_solve_PPP_RAW_problem(problem, summary))
+		failure_stage = "Ceres re-optimization";
+	else if (!_validate_RAW_constraint_values(expected_constraints))
+		failure_stage = "installed-constraint validation";
+	else if (!_validate_RAW_constraint_values(candidates))
+		failure_stage = "candidate-equation validation";
+	else if (!_rebuild_RAW_posterior_transactional(problem))
+		failure_stage = "posterior rebuild";
+	if (failure_stage)
     {
         rollback();
+		if (_spdlog)
+			_spdlog->warn("PPP RAW constraint feedback failed during {}", failure_stage);
         return false;
     }
 
+	for (const RawConstraintKey &key : obsolete)
+		_raw_fixed_constraints.erase(key);
     for (const auto &entry : pending)
     {
         _raw_fixed_constraints[entry.first] = entry.second;
@@ -3495,8 +3559,9 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
     _graph_ambiguity_fixed = true;
     if (_spdlog)
         _spdlog->info(
-            "PPP RAW CONSTRAINT feedback accepted at {}: {} equation(s) updated, {} explicit equation(s), {}",
-            _epoch.str_ymdhms(), pending.size(), _raw_fixed_constraints.size(),
+			"PPP RAW CONSTRAINT feedback accepted at {}: {} equation(s) retired, {} equation(s) installed, {} explicit equation(s), {}",
+			_epoch.str_ymdhms(), obsolete.size(), pending.size(),
+			_raw_fixed_constraints.size(),
             summary.BriefReport());
     return true;
 }

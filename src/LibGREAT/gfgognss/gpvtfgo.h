@@ -421,7 +421,8 @@ namespace gfgomsf
 		bool _translate_RAW_fixed_constraints(
 			const std::vector<great::FixedAmbiguityConstraint> &source,
 			std::map<RawConstraintKey, RawFixedConstraint> &pending,
-			std::map<RawConstraintKey, RawFixedConstraint> &candidates);
+			std::map<RawConstraintKey, RawFixedConstraint> &candidates,
+			std::set<RawConstraintKey> &obsolete);
 		bool _validate_RAW_constraint_values(
 			const std::map<RawConstraintKey, RawFixedConstraint> &constraints) const;
 		bool _apply_RAW_parameter_feedback();
