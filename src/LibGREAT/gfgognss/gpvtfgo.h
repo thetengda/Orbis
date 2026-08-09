@@ -80,7 +80,7 @@ namespace gfgomsf
 		void clearWindow();
 		virtual void publish_foat();
 
-		/** @brief route the ambiguity-fixed (AR) solution to <fgo_ar> instead of <flt>. */
+		/** @brief suppress the legacy separate AR stream; FGO publishes one unified <fgo> solution. */
 		virtual void _output_amb_fixed(const std::string &content) override;
 		
 	protected:
@@ -249,9 +249,7 @@ namespace gfgomsf
 
 		ofstream _output_float_solution;//add for MultiWindow
 		ofstream _output_estimator_info;//add for MultiWindow
-		ofstream _output_ar_solution;//add for fgo ambiguity-resolved solution (separate from <flt>)
-		bool _defer_raw_ar_output = false;
-		std::string _deferred_raw_ar_output;
+		bool _raw_feedback_partial_candidate = false;
 
 		///< velocity of rover
 		double          _headers[GWINDOW_SIZE + 1];						    ///< header info of rover	
@@ -432,13 +430,14 @@ namespace gfgomsf
 			const std::map<RawConstraintKey, RawFixedConstraint> &constraints,
 			const GNSSInfo &float_info, t_gallpar &float_parameters,
 			double &nis, int &degrees_of_freedom,
-			double &chi_square_limit) const;
+			double &chi_square_limit,
+			std::map<RawConstraintKey, RawFixedConstraint> *selected_constraints = nullptr,
+			int minimum_selected_count = 1) const;
 		bool _evaluate_RAW_problem_cost(
 			ceres::Problem &problem,
 			const std::vector<ceres::ResidualBlockId> &residuals,
 			double &cost) const;
-		/** Emit an accepted RAW feedback state from the actual Ceres posterior. */
-		bool _output_RAW_graph_ambiguity_solution();
+		/** Conditionally optimize the current graph with a validated RAW fixed subset. */
 		bool _apply_RAW_parameter_feedback();
 		bool _apply_RAW_constraint_feedback();
 		bool _rebuild_RAW_posterior_transactional(ceres::Problem &problem);

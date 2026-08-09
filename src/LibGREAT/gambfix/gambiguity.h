@@ -268,6 +268,10 @@ namespace great
 		void commitFeedbackTransaction();
 		/** Restore the resolver state from before the current fixing attempt. */
 		bool rollbackFeedbackTransaction();
+		/** Whether graph feedback may retain a statistically valid fixed subset. */
+		bool partialFixEnabled() const noexcept { return _part_fix; }
+		/** Configured lower bound used when retaining graph fixed equations. */
+		int minimumPartialFixCount() const noexcept { return _part_fix_num; }
 
         /** @brief get DD. */
         t_DD_amb &getDD() { return _DD; } 

@@ -76,6 +76,19 @@ namespace
 		return k * transformed * transformed * transformed;
 	}
 
+	const char *observation_model_name(gnut::OBSCOMBIN mode)
+	{
+		switch (mode)
+		{
+		case gnut::OBSCOMBIN::IONO_FREE: return "IONO_FREE";
+		case gnut::OBSCOMBIN::RAW_SINGLE: return "RAW_SINGLE";
+		case gnut::OBSCOMBIN::RAW_DOUBLE: return "RAW_DOUBLE";
+		case gnut::OBSCOMBIN::RAW_ALL: return "RAW_ALL";
+		case gnut::OBSCOMBIN::RAW_MIX: return "RAW_MIX";
+		default: return "DEFAULT";
+		}
+	}
+
 	bool feedback_solve_converged(const ceres::Solver::Summary &summary)
 	{
 		return (summary.termination_type == ceres::CONVERGENCE ||
@@ -235,36 +248,58 @@ t_gfgo_para(gset) {
 	if (o_path.empty() && _spdlog)
 		_spdlog->warn("PPP FGO output <fgo> is not configured; solution stream is disabled");
 
-	// Ambiguity-fixed (AR) solution stream, kept distinct from the filter <flt>
-	// output. Rows are written by the virtual _output_amb_fixed() hook.
-	string ar_path;
-	if (auto output = dynamic_cast<t_gsetout *>(gset))
-	{
-		ar_path = output->outputs("fgo_ar");
-		if (!ar_path.empty())
-		{
-			substitute(ar_path, "$(rec)", _site, false);
-			if (ar_path.compare(0, string(GFILE_PREFIX).size(), GFILE_PREFIX) == 0)
-				ar_path.erase(0, string(GFILE_PREFIX).size());
-			make_path(ar_path);
-			_output_ar_solution.open(
-				ar_path,
-				output->append() ? (ofstream::out | ofstream::app) : ofstream::out);
-		}
-	}
-	if (ar_path.empty() && _spdlog)
-		_spdlog->warn("PPP FGO ambiguity-fixed output <fgo_ar> is not configured; AR stream is disabled");
 	if (_output_float_solution.good()) {
 		_output_float_solution << "#FACTOR GRAPH OPTIMIZATION BASED GNSS SOLUTION" << endl;
-		//_output_float_solution << "#" << "ambiguity propogation: " << dynamic_cast<t_gsetfgo*>(gset)->_amb_propagation() << endl;
-		_output_float_solution << "#" << "FGO WINDOW LENGTH: " << dynamic_cast<t_gsetfgo*>(gset)->gwindow_size() << endl;
-		set<string> sys = dynamic_cast<t_gsetgen*>(gset)->sys();
-		_output_float_solution << "#" << "GNSS system: ";
+		auto *gen_setting = dynamic_cast<t_gsetgen *>(gset);
+		auto *gnss_setting = dynamic_cast<t_gsetgnss *>(gset);
+		auto *amb_setting = dynamic_cast<t_gsetamb *>(gset);
+		const set<string> sys = gen_setting->sys();
+		const int requested_threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
+		const int effective_threads =
+			_observ == OBSCOMBIN::RAW_ALL ? 1 : requested_threads;
+
+		_output_float_solution << "# Processing: estimator=FGO positioning="
+			<< (_isBase ? "PPK" : "PPP")
+			<< " observation=" << observation_model_name(_observ) << endl;
+		_output_float_solution << "# Time: begin=" << gen_setting->beg().str_ymdhms()
+			<< " end=" << gen_setting->end().str_ymdhms()
+			<< " interval=" << gen_setting->sampling() << " s" << endl;
+		_output_float_solution << "# Graph: window_length=" << gwindow_size
+			<< " solver_threads=" << effective_threads;
+		if (effective_threads != requested_threads)
+			_output_float_solution << " (requested=" << requested_threads << ")";
+		_output_float_solution << endl;
+		_output_float_solution << "# Ambiguity: fix="
+			<< amb_setting->fixmode2str(_fix_mode)
+			<< " bias=" << (_upd_mode == UPD_MODE::OSB ? "OSB" : "UPD")
+			<< " partial=" << (amb_setting->part_ambfix() ? "YES" : "NO");
+		if (amb_setting->part_ambfix())
+			_output_float_solution << " min_equations=" << amb_setting->part_ambfix_num();
+		_output_float_solution << " feedback="
+			<< ambiguity_feedback_mode_name(_ambiguity_feedback_mode) << endl;
+		_output_float_solution << "# GNSS systems: ";
 		for (auto it = sys.begin(); it != sys.end(); it++)
 		{
 			_output_float_solution << *it << " ";
 		}
 		_output_float_solution << endl;
+		for (const string &system_name : sys)
+		{
+			const GSYS system = t_gsys::str2gsys(system_name);
+			const map<FREQ_SEQ, GOBSBAND> frequency_bands =
+				gnss_setting->band_index(system);
+			_output_float_solution << "# Signals " << system_name << ":";
+			for (const auto &frequency_band : frequency_bands)
+			{
+				_output_float_solution << " F"
+					<< gfreqseq2str(frequency_band.first) << "=B"
+					<< gobsband2str(frequency_band.second);
+			}
+			_output_float_solution << endl;
+		}
+		_output_float_solution
+			<< "# Output: marker ECEF XYZ [m]; RMS is from the current Ceres posterior; "
+				"AmbStatus is the accepted graph state" << endl;
 		if (_isBase)
 		{
 			t_gtriple xyz_base = _gallobj->obj(_site_base)->crd_arp(_epoch);
@@ -331,8 +366,7 @@ gfgomsf::t_gpvtfgo::~t_gpvtfgo()
 
 void gfgomsf::t_gpvtfgo::_reset_RAW_feedback_problem()
 {
-	_defer_raw_ar_output = false;
-	_deferred_raw_ar_output.clear();
+	_raw_feedback_partial_candidate = false;
 	_raw_feedback_problem.reset();
 	_raw_float_search_info.reset();
 	_raw_float_search_parameters.delAllParam();
@@ -650,8 +684,6 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 			std::unique_ptr<t_gflt> float_filter_snapshot;
 			if (transaction_started && _filter)
 				float_filter_snapshot.reset(new t_gflt(*_filter));
-			_defer_raw_ar_output = transaction_started;
-			_deferred_raw_ar_output.clear();
 			if (!ambiguity_ready)
 			{
 				_amb_state = false;
@@ -681,35 +713,30 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 					if (float_filter_snapshot)
 						*_filter = *float_filter_snapshot;
 					_amb_state = false;
-					_deferred_raw_ar_output.clear();
 					_output_float_ambiguity_solution();
 					if (_spdlog)
 						_spdlog->warn(
-							"PPP RAW ambiguity feedback {} rejected at {}; resolver, filter, graph and AR output restored to float",
+							"PPP RAW ambiguity feedback {} rejected at {}; resolver, filter, graph and unified FGO output restored to float",
 							ambiguity_feedback_mode_name(_ambiguity_feedback_mode),
 							_epoch.str_ymdhms());
 				}
 				else
 				{
-					_ambfix->commitFeedbackTransaction();
-					if (had_fixed_candidate && feedback_ok)
+					if (_raw_feedback_partial_candidate)
 					{
-						// The legacy resolver row describes its conditional filter
-						// state, not the state accepted by Ceres. Replace it with a
-						// row generated from the committed graph posterior.
-						_deferred_raw_ar_output.clear();
-						if (!_output_RAW_graph_ambiguity_solution() && _spdlog)
-							_spdlog->error(
-								"PPP RAW accepted feedback AR output association failed at {}",
-								_epoch.str_ymdhms());
+						// Only the selected graph subset was accepted. Restore all
+						// legacy resolver/filter history so equations omitted from
+						// the graph cannot advance consecutive-fix bookkeeping.
+						_ambfix->rollbackFeedbackTransaction();
+						if (float_filter_snapshot)
+							*_filter = *float_filter_snapshot;
+					}
+					else
+					{
+						_ambfix->commitFeedbackTransaction();
 					}
 				}
 			}
-			_defer_raw_ar_output = false;
-			const string ar_output = _deferred_raw_ar_output;
-			_deferred_raw_ar_output.clear();
-			if (!ar_output.empty())
-				_output_amb_fixed(ar_output);
 			publish_foat();
 		}
 		else
@@ -1058,22 +1085,11 @@ void gfgomsf::t_gpvtfgo::publish_foat()
 
 void gfgomsf::t_gpvtfgo::_output_amb_fixed(const std::string &content)
 {
-	if (_defer_raw_ar_output)
-	{
-		_deferred_raw_ar_output += content;
-		return;
-	}
-    if (_output_ar_solution.good())
-    {
-        _output_ar_solution.write(content.c_str(), content.size());
-        _output_ar_solution.flush();
-    }
-    else
-    {
-        // Legacy fallback: configurations not yet migrated to <fgo_ar> keep
-        // writing the fixed solution to the base <flt> output.
-        t_gpvtflt::_output_amb_fixed(content);
-    }
+	// FGO publishes the accepted graph state, covariance, and ambiguity status
+	// together in the single <fgo> stream.  The base resolver still calls this
+	// hook while preparing a candidate; intentionally suppress that duplicate
+	// legacy AR/FLT coordinate row in FGO mode.
+	(void)content;
 }
 
 // only use for RTK
@@ -3477,8 +3493,12 @@ bool gfgomsf::t_gpvtfgo::_validate_RAW_constraint_values(
 bool gfgomsf::t_gpvtfgo::_validate_RAW_candidate_statistics(
 	const std::map<RawConstraintKey, RawFixedConstraint> &constraints,
 	const GNSSInfo &float_info, t_gallpar &float_parameters,
-	double &nis, int &degrees_of_freedom, double &chi_square_limit) const
+	double &nis, int &degrees_of_freedom, double &chi_square_limit,
+	std::map<RawConstraintKey, RawFixedConstraint> *selected_constraints,
+	int minimum_selected_count) const
 {
+	if (selected_constraints)
+		selected_constraints->clear();
 	nis = std::numeric_limits<double>::quiet_NaN();
 	degrees_of_freedom = 0;
 	chi_square_limit = 0.0;
@@ -3559,8 +3579,183 @@ bool gfgomsf::t_gpvtfgo::_validate_RAW_candidate_statistics(
 		decomposition.eigenvectors().transpose() * innovation;
 	nis = (projected.array().square() * inverse_values.array()).sum();
 	chi_square_limit = chi_square_999_limit(degrees_of_freedom);
-	return std::isfinite(nis) && std::isfinite(chi_square_limit) &&
-		nis >= 0.0 && nis <= chi_square_limit;
+	const bool accepted = std::isfinite(nis) &&
+		std::isfinite(chi_square_limit) && nis >= 0.0 &&
+		nis <= chi_square_limit;
+	if (!accepted && std::isfinite(nis) && std::isfinite(chi_square_limit) &&
+		_spdlog && _spdlog->should_log(spdlog::level::debug))
+	{
+		struct Contributor
+		{
+			double standardized = 0.0;
+			double innovation = 0.0;
+			RawFixedConstraint constraint;
+		};
+		vector<Contributor> contributors;
+		contributors.reserve(constraints.size());
+		row = 0;
+		for (const auto &entry : constraints)
+		{
+			const double variance = innovation_covariance(row, row);
+			Contributor contributor;
+			contributor.standardized = variance > 0.0
+				? std::fabs(innovation(row)) / std::sqrt(variance)
+				: std::numeric_limits<double>::infinity();
+			contributor.innovation = innovation(row);
+			contributor.constraint = entry.second;
+			contributors.push_back(contributor);
+			++row;
+		}
+		std::sort(contributors.begin(), contributors.end(),
+			[](const Contributor &left, const Contributor &right)
+			{
+				return left.standardized > right.standardized;
+			});
+		const size_t report_count = (std::min)(
+			static_cast<size_t>(5), contributors.size());
+		for (size_t i = 0; i < report_count; ++i)
+		{
+			const Contributor &item = contributors[i];
+			RawArcInfo arc_a;
+			RawArcInfo arc_b;
+			const bool has_a = _ambRAW_manager &&
+				_ambRAW_manager->getArcInfo(item.constraint.amb_a, arc_a);
+			const bool has_b = _ambRAW_manager &&
+				_ambRAW_manager->getArcInfo(item.constraint.amb_b, arc_b);
+			_spdlog->debug(
+				"PPP RAW rejected NIS contributor rank={} z={:.3f} innovation={:.6f} arc_a={} sat_a={} freq_a={} arc_b={} sat_b={} freq_b={} target={:.6f}",
+				i + 1, item.standardized, item.innovation,
+				item.constraint.amb_a, has_a ? arc_a.sat : "?",
+				has_a ? static_cast<int>(arc_a.freq) : -1,
+				item.constraint.amb_b, has_b ? arc_b.sat : "?",
+				has_b ? static_cast<int>(arc_b.freq) : -1,
+				item.constraint.target);
+		}
+	}
+	if (accepted)
+	{
+		if (selected_constraints)
+			*selected_constraints = constraints;
+		return true;
+	}
+	if (!selected_constraints || !std::isfinite(nis) ||
+		!std::isfinite(chi_square_limit))
+		return false;
+
+	minimum_selected_count = (std::max)(1, minimum_selected_count);
+	if (static_cast<int>(constraints.size()) <= minimum_selected_count)
+		return false;
+	vector<pair<RawConstraintKey, RawFixedConstraint>> ordered_constraints;
+	ordered_constraints.reserve(constraints.size());
+	for (const auto &entry : constraints)
+		ordered_constraints.push_back(entry);
+	auto subset_statistic = [&](const vector<int> &indices,
+	                            double &subset_nis, int &subset_df,
+	                            double &subset_limit) -> bool
+	{
+		const int size = static_cast<int>(indices.size());
+		if (size <= 0)
+			return false;
+		Eigen::MatrixXd covariance(size, size);
+		Eigen::VectorXd values(size);
+		for (int i = 0; i < size; ++i)
+		{
+			values(i) = innovation(indices[i]);
+			for (int j = 0; j < size; ++j)
+				covariance(i, j) = innovation_covariance(
+					indices[i], indices[j]);
+		}
+		Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(covariance);
+		if (solver.info() != Eigen::Success)
+			return false;
+		const Eigen::VectorXd subset_eigenvalues = solver.eigenvalues();
+		const double maximum = subset_eigenvalues.maxCoeff();
+		if (!std::isfinite(maximum) || maximum <= 0.0)
+			return false;
+		const double tolerance = (std::max)(1e-12, maximum * 1e-10);
+		Eigen::VectorXd inverse = Eigen::VectorXd::Zero(size);
+		subset_df = 0;
+		for (int i = 0; i < size; ++i)
+		{
+			if (subset_eigenvalues(i) > tolerance)
+			{
+				inverse(i) = 1.0 / subset_eigenvalues(i);
+				++subset_df;
+			}
+			else if (subset_eigenvalues(i) < -tolerance)
+			{
+				return false;
+			}
+		}
+		if (subset_df <= 0)
+			return false;
+		const Eigen::VectorXd coordinates =
+			solver.eigenvectors().transpose() * values;
+		subset_nis =
+			(coordinates.array().square() * inverse.array()).sum();
+		subset_limit = chi_square_999_limit(subset_df);
+		return std::isfinite(subset_nis) && std::isfinite(subset_limit) &&
+			subset_nis >= 0.0 && subset_limit > 0.0;
+	};
+
+	vector<int> retained;
+	for (int i = 0; i < equation_count; ++i)
+		retained.push_back(i);
+	vector<int> removed;
+	double retained_nis = nis;
+	int retained_df = degrees_of_freedom;
+	double retained_limit = chi_square_limit;
+	while (static_cast<int>(retained.size()) > minimum_selected_count &&
+		retained_nis > retained_limit)
+	{
+		int best_position = -1;
+		double best_ratio = std::numeric_limits<double>::infinity();
+		double best_nis = 0.0;
+		int best_df = 0;
+		double best_limit = 0.0;
+		for (size_t position = 0; position < retained.size(); ++position)
+		{
+			vector<int> trial = retained;
+			trial.erase(trial.begin() + position);
+			double trial_nis = 0.0;
+			int trial_df = 0;
+			double trial_limit = 0.0;
+			if (!subset_statistic(
+					trial, trial_nis, trial_df, trial_limit))
+				continue;
+			const double ratio = trial_nis / trial_limit;
+			if (ratio < best_ratio)
+			{
+				best_position = static_cast<int>(position);
+				best_ratio = ratio;
+				best_nis = trial_nis;
+				best_df = trial_df;
+				best_limit = trial_limit;
+			}
+		}
+		if (best_position < 0)
+			break;
+		removed.push_back(retained[best_position]);
+		retained.erase(retained.begin() + best_position);
+		retained_nis = best_nis;
+		retained_df = best_df;
+		retained_limit = best_limit;
+	}
+	if (retained_nis > retained_limit ||
+		static_cast<int>(retained.size()) < minimum_selected_count)
+		return false;
+	for (int index : retained)
+		(*selected_constraints)[ordered_constraints[index].first] =
+			ordered_constraints[index].second;
+	nis = retained_nis;
+	degrees_of_freedom = retained_df;
+	chi_square_limit = retained_limit;
+	if (_spdlog)
+		_spdlog->info(
+			"PPP RAW covariance NIS retained a partial candidate: selected={} removed={} NIS={:.3f}/{} limit={:.3f}",
+			selected_constraints->size(), removed.size(), nis,
+			degrees_of_freedom, chi_square_limit);
+	return true;
 }
 
 bool gfgomsf::t_gpvtfgo::_evaluate_RAW_problem_cost(
@@ -3576,82 +3771,6 @@ bool gfgomsf::t_gpvtfgo::_evaluate_RAW_problem_cost(
 	options.residual_blocks = residuals;
 	return problem.Evaluate(options, &cost, nullptr, nullptr, nullptr) &&
 		std::isfinite(cost) && cost >= 0.0;
-}
-
-bool gfgomsf::t_gpvtfgo::_output_RAW_graph_ambiguity_solution()
-{
-	if (!_last_gnss_info || !_last_gnss_info->valid || !_ambfix)
-		return false;
-
-	t_gtriple xyz;
-	const int coordinate_status =
-		_all_para_win.getCrdParam(_site, xyz, _epoch, _epoch);
-	const int coordinate_columns[3] = {
-		_all_para_win.getParam(_site, par_type::CRD_X, "", _epoch, _epoch),
-		_all_para_win.getParam(_site, par_type::CRD_Y, "", _epoch, _epoch),
-		_all_para_win.getParam(_site, par_type::CRD_Z, "", _epoch, _epoch)};
-	if (coordinate_status <= 0 || coordinate_columns[0] < 0 ||
-		coordinate_columns[1] < 0 || coordinate_columns[2] < 0 ||
-		coordinate_columns[0] >= _last_gnss_info->Qx.rows() ||
-		coordinate_columns[1] >= _last_gnss_info->Qx.rows() ||
-		coordinate_columns[2] >= _last_gnss_info->Qx.rows())
-		return false;
-
-	const double variances[3] = {
-		_last_gnss_info->Qx(coordinate_columns[0], coordinate_columns[0]),
-		_last_gnss_info->Qx(coordinate_columns[1], coordinate_columns[1]),
-		_last_gnss_info->Qx(coordinate_columns[2], coordinate_columns[2])};
-	if (!std::isfinite(variances[0]) || !std::isfinite(variances[1]) ||
-		!std::isfinite(variances[2]))
-		return false;
-
-	const double xrms = std::sqrt((std::max)(0.0, variances[0]));
-	const double yrms = std::sqrt((std::max)(0.0, variances[1]));
-	const double zrms = std::sqrt((std::max)(0.0, variances[2]));
-	const double pdop = std::sqrt((std::max)(
-		0.0, variances[0] + variances[1] + variances[2]));
-	const t_gtriple xyz_marker = xyz - _grec->eccxyz(_epoch);
-	const int nsat = static_cast<int>(_all_para_win.amb_prns().size());
-	const Eigen::Vector3d position(
-		xyz_marker[0], xyz_marker[1], xyz_marker[2]);
-	const Eigen::Vector3d zero = Eigen::Vector3d::Zero();
-	const Eigen::Vector3d position_variance(
-		variances[0], variances[1], variances[2]);
-	t_gposdata::data_pos posdata = t_gposdata::data_pos{
-		_epoch.sow() + _epoch.dsec(), position, zero,
-		position_variance, zero, pdop, nsat, true};
-
-	ostringstream output;
-	output << fixed << setprecision(4) << " "
-		   << " " << _epoch.sow() + _epoch.dsec();
-	if (_crd_est != CONSTRPAR::FIX)
-	{
-		output << fixed << setprecision(4)
-			   << " " << setw(15) << xyz_marker[0]
-			   << " " << setw(15) << xyz_marker[1]
-			   << " " << setw(15) << xyz_marker[2]
-			   << " " << setw(10) << 0.0
-			   << " " << setw(10) << 0.0
-			   << " " << setw(10) << 0.0
-			   << " " << setw(9) << xrms
-			   << " " << setw(9) << yrms
-			   << " " << setw(9) << zrms
-			   << " " << setw(9) << 0.0
-			   << " " << setw(9) << 0.0
-			   << " " << setw(9) << 0.0;
-	}
-	output << fixed << setprecision(0)
-		   << " " << setw(5) << nsat
-		   << fixed << setprecision(2)
-		   << " " << setw(5) << pdop
-		   << " " << setw(8) << _last_gnss_info->sig_unit
-		   << " " << setw(8) << "Fixed";
-	if (_fix_mode != FIX_MODE::NO)
-		output << fixed << setprecision(2)
-			   << " " << setw(10) << _ambfix->get_ratio();
-	output << " " << setw(8) << _quality_grade(posdata) << endl;
-	_output_amb_fixed(output.str());
-	return true;
 }
 
 bool gfgomsf::t_gpvtfgo::_RAW_graph_has_live_fixed_ambiguity() const
@@ -3681,6 +3800,7 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 {
 	if (!_ambfix || !_raw_feedback_problem || !_last_gnss_info)
 		return false;
+	_raw_feedback_partial_candidate = false;
 
 	map<RawConstraintKey, RawFixedConstraint> pending;
 	map<RawConstraintKey, RawFixedConstraint> candidates;
@@ -3698,9 +3818,14 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 	double nis = 0.0;
 	int degrees_of_freedom = 0;
 	double chi_square_limit = 0.0;
+	const size_t original_candidate_count = candidates.size();
+	map<RawConstraintKey, RawFixedConstraint> selected_candidates;
+	map<RawConstraintKey, RawFixedConstraint> *selection =
+		_ambfix->partialFixEnabled() ? &selected_candidates : nullptr;
 	if (!_validate_RAW_candidate_statistics(
 			candidates, *_last_gnss_info, _all_para_win,
-			nis, degrees_of_freedom, chi_square_limit))
+			nis, degrees_of_freedom, chi_square_limit, selection,
+			_ambfix->minimumPartialFixCount()))
 	{
 		if (_spdlog)
 			_spdlog->warn(
@@ -3708,6 +3833,19 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 				nis, degrees_of_freedom, chi_square_limit);
 		return false;
 	}
+	if (selection)
+		candidates.swap(selected_candidates);
+	for (auto it = pending.begin(); it != pending.end();)
+	{
+		if (candidates.count(it->first) == 0)
+			it = pending.erase(it);
+		else
+			++it;
+	}
+	if (pending.empty())
+		return false;
+	_raw_feedback_partial_candidate =
+		candidates.size() < original_candidate_count;
 
 	ceres::Problem &problem = *_raw_feedback_problem;
 	vector<double *> parameter_blocks;
@@ -3727,88 +3865,156 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 	if (!_evaluate_RAW_problem_cost(problem, original_residuals, float_cost))
 		return false;
 
-	vector<ceres::ResidualBlockId> temporary_constraints;
-	for (const auto &entry : pending)
+	auto rollback_attempt = [&](const vector<ceres::ResidualBlockId> &residuals)
 	{
-		const RawFixedConstraint &constraint = entry.second;
-		double *address_a = _para_AMB_RAW[constraint.amb_a];
-		double *address_b = _para_AMB_RAW[constraint.amb_b];
-		if (!problem.HasParameterBlock(address_a) ||
-			!problem.HasParameterBlock(address_b))
-			break;
-		temporary_constraints.push_back(problem.AddResidualBlock(
-			new FixedAmbiguityFactor(
-				constraint.coefficient_a, constraint.coefficient_b,
-				constraint.target, constraint.sqrt_information),
-			nullptr, address_a, address_b));
-	}
-
-	auto rollback = [&]()
-	{
-		for (ceres::ResidualBlockId residual : temporary_constraints)
+		for (ceres::ResidualBlockId residual : residuals)
 			problem.RemoveResidualBlock(residual);
 		for (const auto &entry : parameter_snapshot)
 			std::copy(entry.second.begin(), entry.second.end(), entry.first);
 		_all_para_win = float_parameters;
 		_graph_ambiguity_fixed = previously_constrained;
 	};
-	if (temporary_constraints.size() != pending.size())
-	{
-		rollback();
-		return false;
-	}
-
 	ceres::Solver::Summary summary;
-	const char *failure_stage = nullptr;
-	if (!_solve_PPP_RAW_problem(problem, summary))
-		failure_stage = "Ceres re-optimization";
-	else if (!feedback_solve_converged(summary))
-		failure_stage = "Ceres convergence gate";
-	else if (!_validate_RAW_constraint_values(candidates))
-		failure_stage = "candidate-equation validation";
-	if (failure_stage)
+	double cost_increase = std::numeric_limits<double>::quiet_NaN();
+	int nonlinear_subset_retries = 0;
+	while (true)
 	{
-		if (_spdlog)
-			_spdlog->warn(
-				"PPP RAW PARAMETER feedback failed during {}: {}",
-				failure_stage, summary.BriefReport());
-		rollback();
-		return false;
-	}
-	double conditioned_cost = 0.0;
-	if (!_evaluate_RAW_problem_cost(problem, original_residuals, conditioned_cost))
-	{
-		rollback();
-		return false;
-	}
-	const double cost_increase =
-		(std::max)(0.0, 2.0 * (conditioned_cost - float_cost));
-	if (!std::isfinite(cost_increase) || cost_increase > chi_square_limit)
-	{
-		if (_spdlog)
-			_spdlog->warn(
-				"PPP RAW PARAMETER candidate rejected by original-graph cost: delta={} df={} limit={}",
-				cost_increase, degrees_of_freedom, chi_square_limit);
-		rollback();
-		return false;
-	}
-	if (!_rebuild_RAW_posterior_transactional(problem))
-	{
-		rollback();
-		return false;
-	}
+		vector<ceres::ResidualBlockId> temporary_constraints;
+		for (const auto &entry : pending)
+		{
+			const RawFixedConstraint &constraint = entry.second;
+			double *address_a = _para_AMB_RAW[constraint.amb_a];
+			double *address_b = _para_AMB_RAW[constraint.amb_b];
+			if (!problem.HasParameterBlock(address_a) ||
+				!problem.HasParameterBlock(address_b))
+				break;
+			temporary_constraints.push_back(problem.AddResidualBlock(
+				new FixedAmbiguityFactor(
+					constraint.coefficient_a, constraint.coefficient_b,
+					constraint.target, constraint.sqrt_information),
+				nullptr, address_a, address_b));
+		}
+		if (temporary_constraints.size() != pending.size())
+		{
+			rollback_attempt(temporary_constraints);
+			return false;
+		}
 
-	// PARAMETER is a one-epoch conditioning mode: publish the graph-native
-	// conditional state and covariance, but do not retain integer factors in
-	// the next window. CONSTRAINT is the persistent information mode.
-	for (ceres::ResidualBlockId residual : temporary_constraints)
-		problem.RemoveResidualBlock(residual);
+		const char *failure_stage = nullptr;
+		if (!_solve_PPP_RAW_problem(problem, summary))
+			failure_stage = "Ceres re-optimization";
+		else if (!feedback_solve_converged(summary))
+			failure_stage = "Ceres convergence gate";
+		else if (!_validate_RAW_constraint_values(candidates))
+			failure_stage = "candidate-equation validation";
+		if (failure_stage)
+		{
+			if (_spdlog)
+				_spdlog->warn(
+					"PPP RAW PARAMETER feedback failed during {}: {}",
+					failure_stage, summary.BriefReport());
+			rollback_attempt(temporary_constraints);
+			return false;
+		}
+
+		double conditioned_cost = 0.0;
+		if (!_evaluate_RAW_problem_cost(
+				problem, original_residuals, conditioned_cost))
+		{
+			rollback_attempt(temporary_constraints);
+			return false;
+		}
+		cost_increase =
+			(std::max)(0.0, 2.0 * (conditioned_cost - float_cost));
+		if (!std::isfinite(cost_increase) || cost_increase > chi_square_limit)
+		{
+			rollback_attempt(temporary_constraints);
+			const int minimum_count = (std::max)(
+				1, _ambfix->minimumPartialFixCount());
+			if (!_ambfix->partialFixEnabled() ||
+				static_cast<int>(candidates.size()) <= minimum_count ||
+				pending.size() <= 1)
+			{
+				if (_spdlog)
+					_spdlog->warn(
+						"PPP RAW PARAMETER candidate rejected by original-graph cost: delta={} df={} limit={}",
+						cost_increase, degrees_of_freedom,
+						chi_square_limit);
+				return false;
+			}
+
+			RawConstraintKey best_key;
+			bool found = false;
+			double best_ratio = std::numeric_limits<double>::infinity();
+			double best_nis = 0.0;
+			int best_df = 0;
+			double best_limit = 0.0;
+			for (const auto &removable : pending)
+			{
+				map<RawConstraintKey, RawFixedConstraint> trial = candidates;
+				trial.erase(removable.first);
+				if (static_cast<int>(trial.size()) < minimum_count)
+					continue;
+				double trial_nis = 0.0;
+				int trial_df = 0;
+				double trial_limit = 0.0;
+				if (!_validate_RAW_candidate_statistics(
+						trial, *_last_gnss_info, _all_para_win,
+						trial_nis, trial_df, trial_limit))
+					continue;
+				const double ratio = trial_nis / trial_limit;
+				if (ratio < best_ratio)
+				{
+					best_key = removable.first;
+					found = true;
+					best_ratio = ratio;
+					best_nis = trial_nis;
+					best_df = trial_df;
+					best_limit = trial_limit;
+				}
+			}
+			if (!found)
+			{
+				if (_spdlog)
+					_spdlog->warn(
+						"PPP RAW PARAMETER nonlinear cost retry found no valid leave-one-out subset");
+				return false;
+			}
+			candidates.erase(best_key);
+			pending.erase(best_key);
+			nis = best_nis;
+			degrees_of_freedom = best_df;
+			chi_square_limit = best_limit;
+			_raw_feedback_partial_candidate = true;
+			++nonlinear_subset_retries;
+			if (_spdlog)
+				_spdlog->info(
+					"PPP RAW PARAMETER original-graph cost retry removed one equation: retry={} selected={} previous_delta={:.3f} new_linear_NIS={:.3f}/{} limit={:.3f}",
+					nonlinear_subset_retries, candidates.size(), cost_increase,
+					nis, degrees_of_freedom, chi_square_limit);
+			continue;
+		}
+		if (!_rebuild_RAW_posterior_transactional(problem))
+		{
+			rollback_attempt(temporary_constraints);
+			return false;
+		}
+
+		// PARAMETER is a one-epoch conditioning mode: publish the graph-native
+		// conditional state and covariance, but do not retain integer factors in
+		// the next window. CONSTRAINT is the persistent information mode.
+		for (ceres::ResidualBlockId residual : temporary_constraints)
+			problem.RemoveResidualBlock(residual);
+		break;
+	}
 	_double_to_vector();
 	_graph_ambiguity_fixed = true;
 	if (_spdlog)
 		_spdlog->info(
-			"PPP RAW PARAMETER graph conditioning accepted at {}: equations={} NIS={:.3f}/{} delta_cost={:.3f} limit={:.3f}, {}",
-			_epoch.str_ymdhms(), pending.size(), nis, degrees_of_freedom,
+			"PPP RAW PARAMETER graph conditioning accepted at {}: equations={} selected_candidates={}/{} partial={} nonlinear_subset_retries={} NIS={:.3f}/{} delta_cost={:.3f} limit={:.3f}, {}",
+			_epoch.str_ymdhms(), pending.size(), candidates.size(),
+			original_candidate_count, _raw_feedback_partial_candidate,
+			nonlinear_subset_retries, nis, degrees_of_freedom,
 			cost_increase, chi_square_limit, summary.BriefReport());
 	return true;
 }
