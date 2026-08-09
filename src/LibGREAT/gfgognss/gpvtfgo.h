@@ -437,6 +437,8 @@ namespace gfgomsf
 			ceres::Problem &problem,
 			const std::vector<ceres::ResidualBlockId> &residuals,
 			double &cost) const;
+		/** Emit an accepted RAW feedback state from the actual Ceres posterior. */
+		bool _output_RAW_graph_ambiguity_solution();
 		bool _apply_RAW_parameter_feedback();
 		bool _apply_RAW_constraint_feedback();
 		bool _rebuild_RAW_posterior_transactional(ceres::Problem &problem);

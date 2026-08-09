@@ -692,6 +692,17 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 				else
 				{
 					_ambfix->commitFeedbackTransaction();
+					if (had_fixed_candidate && feedback_ok)
+					{
+						// The legacy resolver row describes its conditional filter
+						// state, not the state accepted by Ceres. Replace it with a
+						// row generated from the committed graph posterior.
+						_deferred_raw_ar_output.clear();
+						if (!_output_RAW_graph_ambiguity_solution() && _spdlog)
+							_spdlog->error(
+								"PPP RAW accepted feedback AR output association failed at {}",
+								_epoch.str_ymdhms());
+					}
 				}
 			}
 			_defer_raw_ar_output = false;
@@ -3565,6 +3576,82 @@ bool gfgomsf::t_gpvtfgo::_evaluate_RAW_problem_cost(
 	options.residual_blocks = residuals;
 	return problem.Evaluate(options, &cost, nullptr, nullptr, nullptr) &&
 		std::isfinite(cost) && cost >= 0.0;
+}
+
+bool gfgomsf::t_gpvtfgo::_output_RAW_graph_ambiguity_solution()
+{
+	if (!_last_gnss_info || !_last_gnss_info->valid || !_ambfix)
+		return false;
+
+	t_gtriple xyz;
+	const int coordinate_status =
+		_all_para_win.getCrdParam(_site, xyz, _epoch, _epoch);
+	const int coordinate_columns[3] = {
+		_all_para_win.getParam(_site, par_type::CRD_X, "", _epoch, _epoch),
+		_all_para_win.getParam(_site, par_type::CRD_Y, "", _epoch, _epoch),
+		_all_para_win.getParam(_site, par_type::CRD_Z, "", _epoch, _epoch)};
+	if (coordinate_status <= 0 || coordinate_columns[0] < 0 ||
+		coordinate_columns[1] < 0 || coordinate_columns[2] < 0 ||
+		coordinate_columns[0] >= _last_gnss_info->Qx.rows() ||
+		coordinate_columns[1] >= _last_gnss_info->Qx.rows() ||
+		coordinate_columns[2] >= _last_gnss_info->Qx.rows())
+		return false;
+
+	const double variances[3] = {
+		_last_gnss_info->Qx(coordinate_columns[0], coordinate_columns[0]),
+		_last_gnss_info->Qx(coordinate_columns[1], coordinate_columns[1]),
+		_last_gnss_info->Qx(coordinate_columns[2], coordinate_columns[2])};
+	if (!std::isfinite(variances[0]) || !std::isfinite(variances[1]) ||
+		!std::isfinite(variances[2]))
+		return false;
+
+	const double xrms = std::sqrt((std::max)(0.0, variances[0]));
+	const double yrms = std::sqrt((std::max)(0.0, variances[1]));
+	const double zrms = std::sqrt((std::max)(0.0, variances[2]));
+	const double pdop = std::sqrt((std::max)(
+		0.0, variances[0] + variances[1] + variances[2]));
+	const t_gtriple xyz_marker = xyz - _grec->eccxyz(_epoch);
+	const int nsat = static_cast<int>(_all_para_win.amb_prns().size());
+	const Eigen::Vector3d position(
+		xyz_marker[0], xyz_marker[1], xyz_marker[2]);
+	const Eigen::Vector3d zero = Eigen::Vector3d::Zero();
+	const Eigen::Vector3d position_variance(
+		variances[0], variances[1], variances[2]);
+	t_gposdata::data_pos posdata = t_gposdata::data_pos{
+		_epoch.sow() + _epoch.dsec(), position, zero,
+		position_variance, zero, pdop, nsat, true};
+
+	ostringstream output;
+	output << fixed << setprecision(4) << " "
+		   << " " << _epoch.sow() + _epoch.dsec();
+	if (_crd_est != CONSTRPAR::FIX)
+	{
+		output << fixed << setprecision(4)
+			   << " " << setw(15) << xyz_marker[0]
+			   << " " << setw(15) << xyz_marker[1]
+			   << " " << setw(15) << xyz_marker[2]
+			   << " " << setw(10) << 0.0
+			   << " " << setw(10) << 0.0
+			   << " " << setw(10) << 0.0
+			   << " " << setw(9) << xrms
+			   << " " << setw(9) << yrms
+			   << " " << setw(9) << zrms
+			   << " " << setw(9) << 0.0
+			   << " " << setw(9) << 0.0
+			   << " " << setw(9) << 0.0;
+	}
+	output << fixed << setprecision(0)
+		   << " " << setw(5) << nsat
+		   << fixed << setprecision(2)
+		   << " " << setw(5) << pdop
+		   << " " << setw(8) << _last_gnss_info->sig_unit
+		   << " " << setw(8) << "Fixed";
+	if (_fix_mode != FIX_MODE::NO)
+		output << fixed << setprecision(2)
+			   << " " << setw(10) << _ambfix->get_ratio();
+	output << " " << setw(8) << _quality_grade(posdata) << endl;
+	_output_amb_fixed(output.str());
+	return true;
 }
 
 bool gfgomsf::t_gpvtfgo::_RAW_graph_has_live_fixed_ambiguity() const
