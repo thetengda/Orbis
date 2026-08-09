@@ -89,6 +89,14 @@ namespace
 		}
 	}
 
+	bool prepare_raw_factor(ceres::CostFunction *cost,
+		const std::vector<double *> &blocks)
+	{
+		auto *preparable =
+			dynamic_cast<gfgo::raw_factor_detail::RawPreparableFactor *>(cost);
+		return preparable && preparable->prepare(blocks);
+	}
+
 	bool feedback_solve_converged(const ceres::Solver::Summary &summary)
 	{
 		return (summary.termination_type == ceres::CONVERGENCE ||
@@ -255,8 +263,7 @@ t_gfgo_para(gset) {
 		auto *amb_setting = dynamic_cast<t_gsetamb *>(gset);
 		const set<string> sys = gen_setting->sys();
 		const int requested_threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
-		const int effective_threads =
-			_observ == OBSCOMBIN::RAW_ALL ? 1 : requested_threads;
+		const int effective_threads = requested_threads;
 
 		_output_float_solution << "# Processing: estimator=FGO positioning="
 			<< (_isBase ? "PPK" : "PPP")
@@ -3065,18 +3072,15 @@ ceres::Solver::Options gfgomsf::t_gpvtfgo::_ceres_solver_options() const
     //         SPDLOG_LOGGER_WARN(_spdlog,
     //             "No sparse linear algebra library in this Ceres build; the GNSS FGO graph will fall back to DENSE_QR");
     // }
-    // t_gprecisebiasFGO owns mutable observation-model scratch buffers and
-    // serializes their use.  Extra Ceres workers therefore contend on one
-    // mutex and were measured to increase RAW solve time substantially.
-    // Keep the configuration value for non-RAW graphs, but use the
-    // reproducible fast path for the current RAW implementation.
+    // RAW factors are prepared serially before Solve; their immutable linear
+    // models can therefore be evaluated safely by Ceres worker threads.
     const int requested_threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
-    options.num_threads = _observ == OBSCOMBIN::RAW_ALL ? 1 : requested_threads;
+    options.num_threads = requested_threads;
     if (_observ == OBSCOMBIN::RAW_ALL && requested_threads > 1 &&
         !_raw_thread_warning_logged && _spdlog)
     {
-        _spdlog->warn(
-            "PPP RAW FGO uses one Ceres worker because the observation model has shared mutable state; requested gnss_num_threads={}",
+        _spdlog->info(
+            "PPP RAW FGO uses {} Ceres workers with serially prepared immutable observation factors",
             requested_threads);
         _raw_thread_warning_logged = true;
     }
@@ -3090,13 +3094,118 @@ bool gfgomsf::t_gpvtfgo::_solve_PPP_RAW_problem(
     options.max_num_iterations = 10;
     // Keep Ceres' default Levenberg-Marquardt strategy. DOGLEG reduced the
     // cost of one solve but caused substantially more RAW outlier rebuilds.
-    ceres::Solve(options, &problem, &summary);
+	// Use the same prepared RAW algorithm for every thread count. Threading
+	// must change execution only, not the estimator's numerical semantics.
+	const bool prepared_raw = _observ == OBSCOMBIN::RAW_ALL;
+	const int max_outer_iterations = prepared_raw ? 6 : 1;
+	double max_coordinate_shift = 0.0;
+	int completed_outer_iterations = 0;
+	double first_initial_cost = -1.0;
+	double residual_time = 0.0;
+	double jacobian_time = 0.0;
+	double linear_solver_time = 0.0;
+	double preprocessor_time = 0.0;
+	double postprocessor_time = 0.0;
+	std::vector<ceres::IterationSummary> combined_iterations;
+	for (int outer = 0; outer < max_outer_iterations; ++outer)
+	{
+		if (prepared_raw)
+		{
+			// Prepare in time/satellite order so phase-windup history remains
+			// deterministic; the following Ceres evaluation is read-only.
+			for (int node = 0; node <= _rover_count; ++node)
+			{
+				std::vector<const RAWEquMsg *> ordered_messages;
+				ordered_messages.reserve(_vRAW_msg[node].size());
+				for (const auto &message : _vRAW_msg[node])
+					if (_raw_problem_factors.count(&message) != 0)
+						ordered_messages.push_back(&message);
+				std::stable_sort(ordered_messages.begin(), ordered_messages.end(),
+					[](const RAWEquMsg *left, const RAWEquMsg *right)
+					{
+						return left->sat_global_id < right->sat_global_id;
+					});
+				for (const RAWEquMsg *message : ordered_messages)
+				{
+					const auto factor = _raw_problem_factors.find(message);
+					if (factor == _raw_problem_factors.end() ||
+						!prepare_raw_factor(factor->second.cost,
+							factor->second.blocks))
+					{
+						if (_spdlog)
+							_spdlog->error(
+								"Failed to prepare RAW factor {} {} at {}",
+								message->site, message->sat_id,
+								message->time.str_ymdhms("", false));
+						return false;
+					}
+				}
+			}
+		}
+
+		std::vector<std::array<double, 3>> coordinate_before;
+		coordinate_before.reserve(static_cast<size_t>(_rover_count + 1));
+		for (int node = 0; node <= _rover_count; ++node)
+			coordinate_before.push_back({{
+				_para_CRD[node][0], _para_CRD[node][1], _para_CRD[node][2]}});
+
+		ceres::Solver::Summary pass_summary;
+		ceres::Solve(options, &problem, &pass_summary);
+		if (outer == 0)
+			first_initial_cost = pass_summary.initial_cost;
+		summary = pass_summary;
+		combined_iterations.insert(combined_iterations.end(),
+			pass_summary.iterations.begin(), pass_summary.iterations.end());
+		if (pass_summary.residual_evaluation_time_in_seconds > 0.0)
+			residual_time += pass_summary.residual_evaluation_time_in_seconds;
+		if (pass_summary.jacobian_evaluation_time_in_seconds > 0.0)
+			jacobian_time += pass_summary.jacobian_evaluation_time_in_seconds;
+		if (pass_summary.linear_solver_time_in_seconds > 0.0)
+			linear_solver_time += pass_summary.linear_solver_time_in_seconds;
+		if (pass_summary.preprocessor_time_in_seconds > 0.0)
+			preprocessor_time += pass_summary.preprocessor_time_in_seconds;
+		if (pass_summary.postprocessor_time_in_seconds > 0.0)
+			postprocessor_time += pass_summary.postprocessor_time_in_seconds;
+		++completed_outer_iterations;
+		const bool pass_usable = pass_summary.termination_type != ceres::FAILURE &&
+			std::isfinite(pass_summary.final_cost) && pass_summary.final_cost >= 0.0;
+		if (!pass_usable)
+			break;
+
+		max_coordinate_shift = 0.0;
+		for (int node = 0; node <= _rover_count; ++node)
+		{
+			const double dx = _para_CRD[node][0] - coordinate_before[node][0];
+			const double dy = _para_CRD[node][1] - coordinate_before[node][1];
+			const double dz = _para_CRD[node][2] - coordinate_before[node][2];
+			const double coordinate_shift =
+				std::sqrt(dx * dx + dy * dy + dz * dz);
+			if (coordinate_shift > max_coordinate_shift)
+				max_coordinate_shift = coordinate_shift;
+		}
+		if (!prepared_raw || max_coordinate_shift <= 1e-4)
+			break;
+	}
+	if (completed_outer_iterations > 0)
+	{
+		summary.initial_cost = first_initial_cost;
+		summary.iterations.swap(combined_iterations);
+		summary.residual_evaluation_time_in_seconds = residual_time;
+		summary.jacobian_evaluation_time_in_seconds = jacobian_time;
+		summary.linear_solver_time_in_seconds = linear_solver_time;
+		summary.preprocessor_time_in_seconds = preprocessor_time;
+		summary.postprocessor_time_in_seconds = postprocessor_time;
+	}
 
     const bool usable = summary.termination_type != ceres::FAILURE &&
                         std::isfinite(summary.final_cost) &&
                         summary.final_cost >= 0.0;
     if (!usable && _spdlog)
         _spdlog->error("PPP RAW Ceres solve failed: {}", summary.BriefReport());
+	else if (prepared_raw && _spdlog)
+		_spdlog->debug(
+			"PPP RAW prepared solve outer_iterations={} max_coordinate_shift={:.6g} m",
+			completed_outer_iterations, max_coordinate_shift);
     return usable;
 }
 

@@ -8,6 +8,11 @@ namespace gfgo
     {
     }
 
+    bool CarrierphaseRAWFactor::prepare(const std::vector<double *> &blocks)
+    {
+        return raw_factor_detail::prepareFactor(*this, _cache, blocks);
+    }
+
     bool CarrierphaseRAWFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
     {
         const double crd[3] = {parameters[0][0], parameters[0][1], parameters[0][2]};
@@ -42,6 +47,11 @@ namespace gfgo
     MultiCarrierphaseRAWFactor::MultiCarrierphaseRAWFactor(const RAWEquMsg &message, const t_gallpar &params, t_gprecisebiasFGO *bias_model)
         : _message(message), _params(params), _bias_model(bias_model)
     {
+    }
+
+    bool MultiCarrierphaseRAWFactor::prepare(const std::vector<double *> &blocks)
+    {
+        return raw_factor_detail::prepareFactor(*this, _cache, blocks);
     }
 
     bool MultiCarrierphaseRAWFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const

@@ -9,11 +9,12 @@ using namespace gnut;
 
 namespace gfgo
 {
-    class LibGREAT_LIBRARY_EXPORT PseudorangeRAWFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1>
+    class LibGREAT_LIBRARY_EXPORT PseudorangeRAWFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1>, public raw_factor_detail::RawPreparableFactor
     {
     public:
         PseudorangeRAWFactor(const RAWEquMsg &message, const t_gallpar &params, t_gprecisebiasFGO *bias_model);
         bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const override;
+        bool prepare(const std::vector<double *> &blocks) override;
 
     private:
         RAWEquMsg _message;
@@ -22,11 +23,12 @@ namespace gfgo
         mutable raw_factor_detail::RawEvaluationCache _cache;
     };
 
-    class LibGREAT_LIBRARY_EXPORT MultiPseudorangeRAWFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1, 1>
+    class LibGREAT_LIBRARY_EXPORT MultiPseudorangeRAWFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1, 1>, public raw_factor_detail::RawPreparableFactor
     {
     public:
         MultiPseudorangeRAWFactor(const RAWEquMsg &message, const t_gallpar &params, t_gprecisebiasFGO *bias_model);
         bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const override;
+        bool prepare(const std::vector<double *> &blocks) override;
 
     private:
         RAWEquMsg _message;
@@ -35,11 +37,12 @@ namespace gfgo
         mutable raw_factor_detail::RawEvaluationCache _cache;
     };
 
-    class LibGREAT_LIBRARY_EXPORT PseudorangeRAWIFBFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1, 1>
+    class LibGREAT_LIBRARY_EXPORT PseudorangeRAWIFBFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1, 1>, public raw_factor_detail::RawPreparableFactor
     {
     public:
         PseudorangeRAWIFBFactor(const RAWEquMsg &message, const t_gallpar &params, t_gprecisebiasFGO *bias_model);
         bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const override;
+        bool prepare(const std::vector<double *> &blocks) override;
 
     private:
         RAWEquMsg _message;
@@ -48,11 +51,12 @@ namespace gfgo
         mutable raw_factor_detail::RawEvaluationCache _cache;
     };
 
-    class LibGREAT_LIBRARY_EXPORT MultiPseudorangeRAWIFBFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1, 1, 1>
+    class LibGREAT_LIBRARY_EXPORT MultiPseudorangeRAWIFBFactor : public ceres::SizedCostFunction<1, 3, 1, 1, 1, 1, 1>, public raw_factor_detail::RawPreparableFactor
     {
     public:
         MultiPseudorangeRAWIFBFactor(const RAWEquMsg &message, const t_gallpar &params, t_gprecisebiasFGO *bias_model);
         bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const override;
+        bool prepare(const std::vector<double *> &blocks) override;
 
     private:
         RAWEquMsg _message;

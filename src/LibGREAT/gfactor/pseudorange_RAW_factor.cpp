@@ -8,6 +8,11 @@ namespace gfgo
     {
     }
 
+    bool PseudorangeRAWFactor::prepare(const std::vector<double *> &blocks)
+    {
+        return raw_factor_detail::prepareFactor(*this, _cache, blocks);
+    }
+
     bool PseudorangeRAWFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
     {
         const double crd[3] = {parameters[0][0], parameters[0][1], parameters[0][2]};
@@ -40,6 +45,11 @@ namespace gfgo
     MultiPseudorangeRAWFactor::MultiPseudorangeRAWFactor(const RAWEquMsg &message, const t_gallpar &params, t_gprecisebiasFGO *bias_model)
         : _message(message), _params(params), _bias_model(bias_model)
     {
+    }
+
+    bool MultiPseudorangeRAWFactor::prepare(const std::vector<double *> &blocks)
+    {
+        return raw_factor_detail::prepareFactor(*this, _cache, blocks);
     }
 
     bool MultiPseudorangeRAWFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
@@ -78,6 +88,11 @@ namespace gfgo
     {
     }
 
+    bool PseudorangeRAWIFBFactor::prepare(const std::vector<double *> &blocks)
+    {
+        return raw_factor_detail::prepareFactor(*this, _cache, blocks);
+    }
+
     bool PseudorangeRAWIFBFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
     {
         const double crd[3] = {parameters[0][0], parameters[0][1], parameters[0][2]};
@@ -104,6 +119,11 @@ namespace gfgo
     MultiPseudorangeRAWIFBFactor::MultiPseudorangeRAWIFBFactor(const RAWEquMsg &message, const t_gallpar &params, t_gprecisebiasFGO *bias_model)
         : _message(message), _params(params), _bias_model(bias_model)
     {
+    }
+
+    bool MultiPseudorangeRAWIFBFactor::prepare(const std::vector<double *> &blocks)
+    {
+        return raw_factor_detail::prepareFactor(*this, _cache, blocks);
     }
 
     bool MultiPseudorangeRAWIFBFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const

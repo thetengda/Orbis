@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <mutex>
+#include <vector>
 
 namespace gfgo
 {
@@ -33,8 +34,30 @@ namespace raw_factor_detail
     {
         std::mutex mutex;
         bool valid = false;
+        bool frozen = false;
         std::array<double, 9> state{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
         RawLinearization linearization;
+
+        void reset()
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            valid = false;
+            frozen = false;
+        }
+
+        bool freeze()
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            frozen = valid;
+            return frozen;
+        }
+    };
+
+    class RawPreparableFactor
+    {
+    public:
+        virtual ~RawPreparableFactor() = default;
+        virtual bool prepare(const std::vector<double *> &blocks) = 0;
     };
 
     inline par_type isbType(GSYS system)
@@ -243,6 +266,25 @@ namespace raw_factor_detail
                                            sion, use_isb ? isb : 0.0,
                                            use_ifb ? ifb : 0.0,
                                            use_amb ? amb : 0.0}};
+        // prepare() freezes this cache before Ceres starts worker threads.
+        // The solve then evaluates an immutable first-order observation model,
+        // so no shared precise-model, navigation or windup state is touched.
+        if (cache.frozen)
+        {
+            out = cache.linearization;
+            double delta = 0.0;
+            for (int i = 0; i < 3; ++i)
+                delta += out.coefficient[i] * (state[i] - cache.state[i]);
+            delta += out.coefficient[3] * (state[3] - cache.state[3]);
+            delta += out.coefficient[4] * (state[4] - cache.state[4]);
+            delta += out.coefficient[5] * (state[5] - cache.state[5]);
+            delta += out.isb_coefficient * (state[6] - cache.state[6]);
+            delta += out.ifb_coefficient * (state[7] - cache.state[7]);
+            delta += out.amb_coefficient * (state[8] - cache.state[8]);
+            out.residual -= delta;
+            return std::isfinite(out.residual);
+        }
+
         std::lock_guard<std::mutex> lock(cache.mutex);
         if (cache.valid && cache.state == state)
         {
@@ -263,6 +305,28 @@ namespace raw_factor_detail
         cache.valid = true;
         out = linearization;
         return true;
+    }
+
+    template <typename Factor>
+    inline bool prepareFactor(Factor &factor, RawEvaluationCache &cache,
+                              const std::vector<double *> &blocks)
+    {
+        if (blocks.size() != factor.parameter_block_sizes().size())
+            return false;
+        cache.reset();
+        std::vector<const double *> parameters;
+        parameters.reserve(blocks.size());
+        for (double *block : blocks)
+        {
+            if (!block)
+                return false;
+            parameters.push_back(block);
+        }
+        double residual = 0.0;
+        if (!factor.Evaluate(parameters.data(), &residual, nullptr) ||
+            !std::isfinite(residual))
+            return false;
+        return cache.freeze();
     }
 }
 }

@@ -429,6 +429,17 @@ namespace great
             idx_clk = pars.getParam(name, par_type::CLK, "");
         }
 
+		// An estimated receiver clock belongs to the current linearization
+		// point. Reusing the first value cached for this epoch made the residual
+		// independent of later Ceres clock updates while its Jacobian stayed 1.
+		if (type == "rec" && idx_clk >= 0)
+		{
+			clk = pars[idx_clk].value() / CLIGHT;
+			obj_clk[name].first = crt_epoch;
+			obj_clk[name].second = clk;
+			return std::isfinite(clk);
+		}
+
         // update clk
         if (obj_clk[name].first != crt_epoch)
         {
