@@ -1,6 +1,8 @@
 #include"gprecisebiasFGO.h"
 //#include "gproc/glsqmatrix.h"
 
+#include <cmath>
+
 namespace gfgo
 {
 
@@ -41,12 +43,35 @@ namespace gfgo
 		}
 
 		tuple<string, string, t_gtime>* flag = &_rec_sat_before;
+		std::array<double, 4> receiver_state{{0.0, 0.0, 0.0, 0.0}};
+		const par_type receiver_types[4] = {
+			par_type::CRD_X, par_type::CRD_Y, par_type::CRD_Z, par_type::CLK};
+		bool receiver_state_valid = true;
+		for (int component = 0; component < 4; ++component)
+		{
+			const int index = params.getParam(
+				obsdata.site(), receiver_types[component], "");
+			if (index < 0 || !std::isfinite(params[index].value()))
+			{
+				receiver_state_valid = false;
+				break;
+			}
+			receiver_state[component] = params[index].value();
+		}
 		// The legacy cache key contains only site/satellite/epoch.  That is
 		// sufficient while forming one filter equation, but not while Ceres
 		// repeatedly evaluates the same observation at different parameter
-		// points.  RAW factors therefore request a complete refresh.
-		if (force_refresh || make_tuple(obsdata.site(), obsdata.sat(), epoch) != *flag)
+		// points. Reuse geometry only when both identity and receiver state match.
+		const bool preparation_matches =
+			!force_refresh && receiver_state_valid &&
+			_prepared_receiver_state_valid &&
+			receiver_state == _prepared_receiver_state &&
+			make_tuple(obsdata.site(), obsdata.sat(), epoch) == *flag;
+		if (!preparation_matches)
 		{
+			// A failed refresh may already have overwritten part of the shared
+			// scratch state, so the preceding key must stop being reusable now.
+			_prepared_receiver_state_valid = false;
 			bool update_valid = t_gprecisebiasGPP::_update_obs_info_GPP(epoch, _gall_nav, _gallobj, obsdata, params);
 			if (!update_valid)
 			{
@@ -86,6 +111,8 @@ namespace gfgo
 				return false;
 			}
 			*flag = make_tuple(obsdata.site(), obsdata.sat(), epoch);
+			_prepared_receiver_state = receiver_state;
+			_prepared_receiver_state_valid = receiver_state_valid;
 		}
 		//cout << obsdata.site() << " " << obsdata.sat() << endl;
 

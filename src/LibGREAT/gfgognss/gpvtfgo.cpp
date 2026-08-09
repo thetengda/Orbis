@@ -4644,8 +4644,20 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
         for (int i = 0; i <= _rover_count; ++i)
         {
             const t_gallpar params_temp(_para_window[i]);
-            for (const auto &message : _vRAW_msg[i])
+			vector<const RAWEquMsg *> ordered_messages;
+			ordered_messages.reserve(_vRAW_msg[i].size());
+			for (const auto &message : _vRAW_msg[i])
+				ordered_messages.push_back(&message);
+			// Keep one satellite's factors adjacent for geometry reuse. The message
+			// vector stays unchanged so posterior and outlier indices remain stable.
+			stable_sort(ordered_messages.begin(), ordered_messages.end(),
+				[](const RAWEquMsg *left, const RAWEquMsg *right)
+				{
+					return left->sat_global_id < right->sat_global_id;
+				});
+			for (const RAWEquMsg *message_ptr : ordered_messages)
             {
+				const RAWEquMsg &message = *message_ptr;
                 const int sat_id = message.sat_global_id;
                 if (sat_id < 0 || sat_id >= NUM_OF_ARC ||
                     message.obs == GOBS::X || node_sion[i].count(sat_id) == 0)

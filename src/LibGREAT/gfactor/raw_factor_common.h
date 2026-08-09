@@ -158,7 +158,7 @@ namespace raw_factor_detail
         t_gobs gobs(message.obs);
         t_gbaseEquation equation;
         t_gtime epoch = message.time;
-        if (!bias_model->cmb_equ(false, true, epoch, params, obsdata, gobs, equation, true) ||
+        if (!bias_model->cmb_equ(false, true, epoch, params, obsdata, gobs, equation, false) ||
             equation.B.empty() || equation.P.empty() || equation.l.empty() ||
             equation.P.front() <= 0.0)
         {

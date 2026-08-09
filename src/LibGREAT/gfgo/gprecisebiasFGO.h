@@ -21,6 +21,7 @@ History
 #include "gexport/ExportLibGREAT.h"
 #include "gmodels/gprecisebiasGPP.h"
 
+#include <array>
 #include <mutex>
 
 namespace gfgo
@@ -90,6 +91,10 @@ namespace gfgo
 		///< serializes cmb_equ so parallel Ceres residual evaluation does not
 		///< race on the shared scratch state (_crt_obs, _crs_sat_crd, ...)
 		std::mutex _cmb_equ_mutex;
+		// The legacy key omits the receiver state. Ceres may revisit the same
+		// satellite at a different linearization point, so cache it explicitly.
+		std::array<double, 4> _prepared_receiver_state{{0.0, 0.0, 0.0, 0.0}};
+		bool _prepared_receiver_state_valid = false;
 
 	};
 }
