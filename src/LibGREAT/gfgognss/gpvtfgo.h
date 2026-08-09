@@ -415,6 +415,8 @@ namespace gfgomsf
 		static int _raw_ifb_slot(GSYS system, FREQ_SEQ frequency);
 		static par_type _raw_ifb_type(int slot);
 		t_randomwalk *_raw_ifb_stochastic_model(int slot) const;
+		/** IFB states backed by at least one code factor at the selected node. */
+		std::set<int> _raw_active_ifb_slots(int node) const;
 		void _add_RAW_fixed_constraints(ceres::Problem &problem,
 			const std::set<int> &problem_ambiguities);
 		bool _write_RAW_fixed_solution(t_gallpar &fixed_parameters);

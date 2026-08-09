@@ -19,6 +19,14 @@ namespace gfgo
 {
 	using ParameterBlockKey = std::uintptr_t;
 
+	enum class GNSSCovarianceSource : std::uint8_t
+	{
+		UNAVAILABLE = 0,
+		CERES_FULL_RANK,
+		CERES_PSEUDOINVERSE,
+		REGULARIZED_EQUATION_FALLBACK
+	};
+
 	/**
 		*@brief class for construting residual blocks (for single observation equation)
 		*/
@@ -156,6 +164,8 @@ namespace gfgo
 		double          vtpv;
 		const double eps = 1e-8;
 		bool valid;
+		GNSSCovarianceSource covariance_source =
+			GNSSCovarianceSource::UNAVAILABLE;
 	};
 
 	class LibGREAT_LIBRARY_EXPORT MarginalizationGNSSFactor : public ceres::CostFunction

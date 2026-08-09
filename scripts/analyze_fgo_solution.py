@@ -277,7 +277,7 @@ def continuity_metrics(
     rows: Sequence[SolutionRow],
     interval: float,
     nominal_start: float,
-    hours: int,
+    hours: float,
 ) -> Dict[str, object]:
     duplicate_epochs: List[float] = []
     gap_intervals: List[Dict[str, float]] = []
@@ -526,10 +526,10 @@ def group_scalar_events(
 
 
 def hourly_metrics(
-    errors: Sequence[ErrorRow], nominal_start: float, hours: int
+    errors: Sequence[ErrorRow], nominal_start: float, hours: float
 ) -> List[Dict[str, object]]:
     result: List[Dict[str, object]] = []
-    for hour in range(hours):
+    for hour in range(int(math.ceil(hours))):
         begin = nominal_start + hour * 3600.0
         end = begin + 3600.0
         subset = [row for row in errors if begin <= row.sow < end]
@@ -964,7 +964,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline", type=Path, help="FLT solution used for same-epoch comparison")
     parser.add_argument("--nominal-start-sow", type=float, required=True)
     parser.add_argument("--interval", type=float, default=30.0)
-    parser.add_argument("--hours", type=int, default=24)
+    parser.add_argument(
+        "--hours",
+        type=float,
+        default=24.0,
+        help="nominal analysis span in hours; fractional values are supported",
+    )
     parser.add_argument("--warmup-minutes", type=float, default=30.0)
     parser.add_argument("--window-minutes", type=float, default=5.0)
     parser.add_argument("--horizontal-threshold", type=float, default=0.10)

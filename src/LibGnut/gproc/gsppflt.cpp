@@ -1967,7 +1967,7 @@ namespace gnut
                 if (freq > _frequency)
                     continue; 
                 // check whether 3 frequencies obs_P exist
-                if ((obsP.type() == TYPE_C || obsP.type() == TYPE_P) && freq >= FREQ_3)
+                if ((obsP.type() == TYPE_C || obsP.type() == TYPE_P) && freq == FREQ_3)
                 {
                     if (gsys == GPS)
                     {
@@ -1987,7 +1987,7 @@ namespace gnut
                     }      
                 }
                 // check whether 4 frequencies obs_P exist
-                if ((obsP.type() == TYPE_C || obsP.type() == TYPE_P) && freq >= FREQ_4)
+                if ((obsP.type() == TYPE_C || obsP.type() == TYPE_P) && freq == FREQ_4)
                 {
                     if (gsys == GAL)
                     {
@@ -1999,7 +1999,7 @@ namespace gnut
                     }
                 }
                 // check whether 5 frequencies obs_P exist
-                if ((obsP.type() == TYPE_C || obsP.type() == TYPE_P) && freq >= FREQ_5)
+                if ((obsP.type() == TYPE_C || obsP.type() == TYPE_P) && freq == FREQ_5)
                 {
                     if (gsys == GAL)
                     {

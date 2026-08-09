@@ -194,7 +194,7 @@ namespace great
             _ewl24_Upd_time = t;
             _ewl25_Upd_time = t;
         }
-        for (auto it : _fix_epo_num[mode])
+        for (auto &it : _fix_epo_num[mode])
         {
 
             if (abs(t.diff(_last_fix_time[mode][it.first])) > _interval + 0.01)

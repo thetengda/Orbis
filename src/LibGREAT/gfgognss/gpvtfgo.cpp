@@ -856,12 +856,62 @@ gnut::t_randomwalk *gfgomsf::t_gpvtfgo::_raw_ifb_stochastic_model(int slot) cons
 	}
 }
 
+std::set<int> gfgomsf::t_gpvtfgo::_raw_active_ifb_slots(int node) const
+{
+	std::set<int> active;
+	if (node < 0 || node >= static_cast<int>(_vRAW_msg.size()) ||
+		node > _rover_count)
+		return active;
+
+	for (const RAWEquMsg &message : _vRAW_msg[node])
+	{
+		if (message.obs_type != TYPE_C || message.obs == GOBS::X ||
+			message.sat_global_id < 0 || message.sat_global_id >= NUM_OF_ARC)
+			continue;
+
+		const GSYS system = message.satdata.gsys();
+		const bool active_system =
+			system == GSYS::GPS ||
+			(system == GSYS::GAL && !_lost_isb_GAL[node]) ||
+			(system == GSYS::BDS && !_lost_isb_BDS[node]) ||
+			(system == GSYS::GLO && !_lost_isb_GLO[node]) ||
+			(system == GSYS::QZS && !_lost_isb_QZS[node]);
+		if (!active_system)
+			continue;
+
+		const int slot = _raw_ifb_slot(system, message.freq);
+		if (slot >= 0 && slot < RAW_IFB_COUNT)
+			active.insert(slot);
+	}
+	return active;
+}
+
 
 void gfgomsf::t_gpvtfgo::publish_foat()
 {
     // get CRD params
     t_gtriple xyz, ell;
-    _all_para_win.getCrdParam(_site, xyz, _epoch, _epoch);
+    const int coordinate_status =
+        _all_para_win.getCrdParam(_site, xyz, _epoch, _epoch);
+    const int coordinate_columns[3] = {
+        _all_para_win.getParam(_site, par_type::CRD_X, "", _epoch, _epoch),
+        _all_para_win.getParam(_site, par_type::CRD_Y, "", _epoch, _epoch),
+        _all_para_win.getParam(_site, par_type::CRD_Z, "", _epoch, _epoch)};
+    const bool coordinate_covariance_valid =
+        _last_gnss_info && coordinate_status > 0 &&
+        coordinate_columns[0] >= 0 && coordinate_columns[1] >= 0 &&
+        coordinate_columns[2] >= 0 &&
+        coordinate_columns[0] < _last_gnss_info->Qx.rows() &&
+        coordinate_columns[1] < _last_gnss_info->Qx.rows() &&
+        coordinate_columns[2] < _last_gnss_info->Qx.rows();
+    if (!coordinate_covariance_valid)
+    {
+        if (_spdlog)
+            _spdlog->error(
+                "PPP FGO: current-epoch coordinate/covariance association failed at {}",
+                _epoch.str_ymdhms());
+        return;
+    }
     xyz2ell(xyz, ell, false);
 
     // CRD using eccentricities
@@ -869,14 +919,20 @@ void gfgomsf::t_gpvtfgo::publish_foat()
 
     double Xrms = 0.0, Yrms = 0.0, Zrms = 0.0,
         Vxrms = 0.0, Vyrms = 0.0, Vzrms = 0.0;
-    Xrms = sqrt(_last_gnss_info->Qx(0, 0));
-    Yrms = sqrt(_last_gnss_info->Qx(1, 1));
-    Zrms = sqrt(_last_gnss_info->Qx(2, 2));
+    const double coordinate_variance[3] = {
+        _last_gnss_info->Qx(coordinate_columns[0], coordinate_columns[0]),
+        _last_gnss_info->Qx(coordinate_columns[1], coordinate_columns[1]),
+        _last_gnss_info->Qx(coordinate_columns[2], coordinate_columns[2])};
+    Xrms = sqrt((std::max)(0.0, coordinate_variance[0]));
+    Yrms = sqrt((std::max)(0.0, coordinate_variance[1]));
+    Zrms = sqrt((std::max)(0.0, coordinate_variance[2]));
 
     t_gtriple crd_rms(Xrms, Yrms, Zrms);
     t_gtriple vRec(0, 0, 0);
     vRec = t_gtriple(0.0, 0.0, 0.0);
-    double pdop = sqrt(_last_gnss_info->Qx(0, 0) + _last_gnss_info->Qx(1, 1) + _last_gnss_info->Qx(2, 2));
+    double pdop = sqrt((std::max)(
+        0.0, coordinate_variance[0] + coordinate_variance[1] +
+                 coordinate_variance[2]));
 
     set<string> ambs = _all_para_win.amb_prns();
     int nsat = ambs.size();
@@ -2695,6 +2751,18 @@ bool gfgomsf::t_gpvtfgo::_pre_amb_resolution()
 	double vtpv_fgo;
 	if (!ambiguity_info || !ambiguity_info->valid)
 		return false;
+	if (_observ == OBSCOMBIN::RAW_ALL &&
+		ambiguity_info->covariance_source !=
+			GNSSCovarianceSource::CERES_FULL_RANK)
+	{
+		if (_spdlog)
+			_spdlog->warn(
+				"PPP FGO RAW: ambiguity search skipped at {} because its "
+				"covariance is not a full-rank Ceres covariance (source={})",
+				_epoch.str_ymdhms(),
+				static_cast<int>(ambiguity_info->covariance_source));
+		return false;
+	}
 	nobs_total = ambiguity_info->linearized_jacobians.rows();
 	npar_number = ambiguity_info->linearized_jacobians.cols();
 	if (npar_number != construct_para.parNumber() || npar_number <= 0)
@@ -3644,6 +3712,43 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
         ceres::LossFunction *loss_function = new ceres::HuberLoss(_loss_func_value);
         ceres::LossFunction *loss_function_cp = new ceres::HuberLoss(_loss_func_value);
 
+        // IFB parameters exist in the legacy filter whenever the configured
+        // frequency is enabled, even when no matching code observable survives
+        // product/quality selection.  Only materialize an IFB in the graph when
+        // at least one code factor at that node actually uses it; otherwise the
+        // unused scalar creates an artificial null direction in the Jacobian.
+        vector<set<int>> node_active_ifb(static_cast<size_t>(_rover_count + 1));
+        for (int i = 0; i <= _rover_count; ++i)
+            node_active_ifb[i] = _raw_active_ifb_slots(i);
+		for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
+		{
+			const bool prior_has_node0 =
+				find(_last_gnss_marginalization_para_blocks.begin(),
+					 _last_gnss_marginalization_para_blocks.end(),
+					 &_ifb[slot][0]) !=
+				_last_gnss_marginalization_para_blocks.end();
+			for (int i = 0; i <= _rover_count; ++i)
+			{
+				if (node_active_ifb[i].count(slot) == 0)
+				{
+					_raw_ifb_initial[slot][i] = false;
+					continue;
+				}
+				const bool starts_graph_segment =
+					i == 0 ? !prior_has_node0
+					       : node_active_ifb[i - 1].count(slot) == 0;
+				if (starts_graph_segment)
+				{
+					_raw_ifb_initial[slot][i] = true;
+					_ifb_initial_value[slot][i] = _ifb[slot][i];
+				}
+				else
+				{
+					_raw_ifb_initial[slot][i] = false;
+				}
+			}
+		}
+
         // --- Common epoch states: one block per window node. ---
         // CRD(3)/CLK(1)/TRP(1) are always present; each system ISB is only
         // added while that system is not lost for the node.
@@ -3661,7 +3766,7 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 			if (!_lost_isb_QZS[i])
 				problem.AddParameterBlock(_para_ISB_QZS[i], 1);
 			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
-				if (!_lost_ifb[slot][i])
+				if (node_active_ifb[i].count(slot) != 0)
 					problem.AddParameterBlock(&_ifb[slot][i], 1);
         }
 
@@ -3761,7 +3866,8 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
 			{
 				t_randomwalk *model = _raw_ifb_stochastic_model(slot);
-				if (_lost_ifb[slot][i] || _lost_ifb[slot][i - 1] || !model)
+				if (node_active_ifb[i].count(slot) == 0 ||
+					node_active_ifb[i - 1].count(slot) == 0 || !model)
 					continue;
 				const double q = graph_interval_random_walk_q(model, graph_dt);
 				if (q > 0.0 && std::isfinite(q))
@@ -3786,7 +3892,8 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 			if (!_lost_isb_QZS[i])
 				problem.AddResidualBlock(new InitialFactor(0.0, 1.0 / _sig_init_qzs), nullptr, _para_ISB_QZS[i]);
 			for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
-				if (!_lost_ifb[slot][i] && _raw_ifb_initial[slot][i])
+				if (node_active_ifb[i].count(slot) != 0 &&
+					_raw_ifb_initial[slot][i])
 					problem.AddResidualBlock(new InitialFactor(_ifb_initial_value[slot][i], 1.0 / 3000.0),
 										 nullptr, &_ifb[slot][i]);
         }
@@ -3836,7 +3943,8 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 				if (message.obs_type == TYPE_C)
 				{
 					const int ifb_slot = _raw_ifb_slot(system, message.freq);
-					const bool use_ifb = ifb_slot >= 0 && !_lost_ifb[ifb_slot][i];
+					const bool use_ifb = ifb_slot >= 0 &&
+						node_active_ifb[i].count(ifb_slot) != 0;
 					if (is_gps)
 					{
 						measurement_blocks = {_para_CRD[i], _para_CLK[i],
@@ -5221,6 +5329,8 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
 	const set<int> active_amb_set(
 		_ambRAW_manager->ambiguity_ids.begin(),
 		_ambRAW_manager->ambiguity_ids.end());
+	const set<int> node0_active_ifb = _raw_active_ifb_slots(0);
+	const set<int> node1_active_ifb = _raw_active_ifb_slots(1);
     vector<RawConstraintKey> absorbed_constraint_keys;
 	map<RawConstraintKey, RawFixedConstraint> next_prior_fixed_history;
 	bool carried_old_prior = false;
@@ -5305,7 +5415,8 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
         if (message.obs_type == TYPE_C)
         {
 			const int ifb_slot = _raw_ifb_slot(system, message.freq);
-			const bool use_ifb = ifb_slot >= 0 && !_lost_ifb[ifb_slot][0];
+			const bool use_ifb = ifb_slot >= 0 &&
+				node0_active_ifb.count(ifb_slot) != 0;
             if (is_gps)
             {
                 blocks = {_para_CRD[0], _para_CLK[0], _para_TRP[0], &_para_SION[0][message.sat_global_id]};
@@ -5408,7 +5519,8 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
 
 	for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
 	{
-		if (_lost_ifb[slot][0] || !_raw_ifb_initial[slot][0])
+		if (node0_active_ifb.count(slot) == 0 ||
+			!_raw_ifb_initial[slot][0])
 			continue;
 		gnss_marginalization_info->addResidualBlockInfo(
 			new GNSSResidualBlockInfo(
@@ -5466,7 +5578,8 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP_RAW()
 		for (int slot = 0; slot < RAW_IFB_COUNT; ++slot)
 		{
 			t_randomwalk *model = _raw_ifb_stochastic_model(slot);
-			if (_lost_ifb[slot][0] || _lost_ifb[slot][1] || !model)
+			if (node0_active_ifb.count(slot) == 0 ||
+				node1_active_ifb.count(slot) == 0 || !model)
 				continue;
 			const double q = graph_interval_random_walk_q(model, graph_dt);
 			if (q > 0.0 && std::isfinite(q))
@@ -5971,20 +6084,23 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
     map<ParameterBlockKey, int> ambiguity_block_ids;
     bool parameter_addresses_consistent = true;
 
-    auto make_parameter = [&](par_type type, const string &prn, double value,
-                              bool arc) -> t_gpar
+    auto make_epoch_parameter = [&](par_type type, const string &prn,
+                                    double value,
+                                    const t_gtime &parameter_epoch) -> t_gpar
     {
         t_gpar parameter(_site, type, 1, prn);
         parameter.value(value);
         parameter.apriori(value);
-        parameter.setTime(_epoch, arc ? LAST_TIME : _epoch);
+        parameter.setTime(parameter_epoch, parameter_epoch);
         return parameter;
     };
     auto make_arc_parameter = [&](par_type type, const string &prn,
                                   double value, const t_gtime &arc_beg,
                                   const t_gtime &arc_end) -> t_gpar
     {
-        t_gpar parameter = make_parameter(type, prn, value, true);
+        t_gpar parameter(_site, type, 1, prn);
+        parameter.value(value);
+        parameter.apriori(value);
         parameter.setTime(arc_beg, arc_end);
         return parameter;
     };
@@ -6027,8 +6143,14 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
         return;
     }
 
+    vector<set<int>> node_active_ifb(static_cast<size_t>(_rover_count + 1));
+    for (int node = 0; node <= _rover_count; ++node)
+        node_active_ifb[node] = _raw_active_ifb_slots(node);
+
     for (int node = 0; node <= _rover_count; ++node)
     {
+        const t_gtime parameter_epoch =
+            _rover_window[node] ? _rover_window[node]->cur_time : _epoch;
         for (const auto &message : _vRAW_msg[node])
         {
             if (message.sat_global_id < 0 || message.sat_global_id >= NUM_OF_ARC)
@@ -6058,35 +6180,42 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
             gnss_info->addResidualBlockInfo(residual_block, map<ParameterBlockKey, vector<int>>());
 
             vector<t_gpar> crd_parameters;
-            crd_parameters.push_back(make_parameter(par_type::CRD_X, "", _para_CRD[node][0], false));
-            crd_parameters.push_back(make_parameter(par_type::CRD_Y, "", _para_CRD[node][1], false));
-            crd_parameters.push_back(make_parameter(par_type::CRD_Z, "", _para_CRD[node][2], false));
+            crd_parameters.push_back(make_epoch_parameter(
+                par_type::CRD_X, "", _para_CRD[node][0], parameter_epoch));
+            crd_parameters.push_back(make_epoch_parameter(
+                par_type::CRD_Y, "", _para_CRD[node][1], parameter_epoch));
+            crd_parameters.push_back(make_epoch_parameter(
+                par_type::CRD_Z, "", _para_CRD[node][2], parameter_epoch));
             register_descriptor(blocks[0], crd_parameters);
-            register_descriptor(blocks[1], {make_parameter(par_type::CLK, "", _para_CLK[node][0], false)});
-            register_descriptor(blocks[2], {make_parameter(par_type::TRP, "", _para_TRP[node][0], false)});
-             register_descriptor(blocks[3], {make_parameter(par_type::SION, message.sat_id,
-                                                              _para_SION[node][message.sat_global_id], false)});
+            register_descriptor(blocks[1], {make_epoch_parameter(
+                par_type::CLK, "", _para_CLK[node][0], parameter_epoch)});
+            register_descriptor(blocks[2], {make_epoch_parameter(
+                par_type::TRP, "", _para_TRP[node][0], parameter_epoch)});
+            register_descriptor(blocks[3], {make_epoch_parameter(
+                par_type::SION, message.sat_id,
+                _para_SION[node][message.sat_global_id], parameter_epoch)});
 
             if (message.obs_type == TYPE_C)
             {
 				int next_block = 4;
 				if (!is_gps)
 				{
-					register_descriptor(blocks[next_block], {make_parameter(raw_factor_detail::isbType(system), "",
+					register_descriptor(blocks[next_block], {make_epoch_parameter(raw_factor_detail::isbType(system), "",
 						is_gal ? _para_ISB_GAL[node][0] :
 						(is_bds ? _para_ISB_BDS[node][0] :
-						 (is_glo ? _para_ISB_GLO[node][0] : _para_ISB_QZS[node][0])), false)});
+						 (is_glo ? _para_ISB_GLO[node][0] : _para_ISB_QZS[node][0])), parameter_epoch)});
 					++next_block;
 				}
 				const int ifb_slot = _raw_ifb_slot(system, message.freq);
-				if (ifb_slot >= 0 && !_lost_ifb[ifb_slot][node])
+				if (ifb_slot >= 0 &&
+					node_active_ifb[node].count(ifb_slot) != 0)
 				{
 					if (next_block >= static_cast<int>(blocks.size()))
 						parameter_addresses_consistent = false;
 					else
 						register_descriptor(blocks[next_block],
-							{make_parameter(_raw_ifb_type(ifb_slot), "",
-											_ifb[ifb_slot][node], false)});
+							{make_epoch_parameter(_raw_ifb_type(ifb_slot), "",
+											_ifb[ifb_slot][node], parameter_epoch)});
 				}
             }
             else if (message.obs_type == TYPE_L)
@@ -6094,10 +6223,10 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
                 int amb_block = is_gps ? 4 : 5;
                 if (!is_gps)
                 {
-                    register_descriptor(blocks[4], {make_parameter(raw_factor_detail::isbType(system), "",
+                    register_descriptor(blocks[4], {make_epoch_parameter(raw_factor_detail::isbType(system), "",
                                                                      is_gal ? _para_ISB_GAL[node][0] :
 							 (is_bds ? _para_ISB_BDS[node][0] :
-							  (is_glo ? _para_ISB_GLO[node][0] : _para_ISB_QZS[node][0])), false)});
+							  (is_glo ? _para_ISB_GLO[node][0] : _para_ISB_QZS[node][0])), parameter_epoch)});
                 }
                 t_gtime ambiguity_beg = message.time;
                 t_gtime ambiguity_end = LAST_TIME;
@@ -6241,6 +6370,7 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
     }
 
     bool covariance_ok = false;
+    bool covariance_is_pseudoinverse = false;
     Eigen::MatrixXd covariance_matrix;
     if (covariance_blocks_valid && !covariance_blocks.empty())
     {
@@ -6251,19 +6381,65 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
 		posterior_prof_sw.reset();
         covariance_ok = covariance.Compute(covariance_blocks, &problem);
 		_fgo_prof.raw_cov_compute.add(posterior_prof_sw.ms());
+
+		// Sparse QR intentionally refuses rank-deficient graphs.  A RAW graph
+		// should normally be full rank after unused states are pruned, but retain
+		// a Moore-Penrose fallback for diagnostics and graceful handling of an
+		// unexpected gauge direction.  Its provenance is recorded so ambiguity
+		// feedback can fail closed instead of treating it as a full covariance.
+		if (!covariance_ok)
+		{
+			ceres::Covariance::Options svd_options;
+			svd_options.algorithm_type = ceres::DENSE_SVD;
+			svd_options.null_space_rank = -1;
+			svd_options.apply_loss_function = true;
+			ceres::Covariance svd_covariance(svd_options);
+			posterior_prof_sw.reset();
+			covariance_ok = svd_covariance.Compute(covariance_blocks, &problem);
+			_fgo_prof.raw_cov_compute.add(posterior_prof_sw.ms());
+			if (covariance_ok)
+			{
+				covariance_is_pseudoinverse = true;
+				covariance_matrix = Eigen::MatrixXd::Zero(column, column);
+				posterior_prof_sw.reset();
+				covariance_ok = svd_covariance.GetCovarianceMatrix(
+					covariance_blocks, covariance_matrix.data());
+				_fgo_prof.raw_cov_get.add(posterior_prof_sw.ms());
+			}
+		}
         if (covariance_ok)
         {
-            covariance_matrix = Eigen::MatrixXd::Zero(column, column);
-			posterior_prof_sw.reset();
-            covariance.GetCovarianceMatrix(covariance_blocks,
-                                           covariance_matrix.data());
-			_fgo_prof.raw_cov_get.add(posterior_prof_sw.ms());
+			if (!covariance_is_pseudoinverse)
+			{
+				covariance_matrix = Eigen::MatrixXd::Zero(column, column);
+				posterior_prof_sw.reset();
+				covariance_ok = covariance.GetCovarianceMatrix(
+					covariance_blocks, covariance_matrix.data());
+				_fgo_prof.raw_cov_get.add(posterior_prof_sw.ms());
+			}
         }
     }
+	if (covariance_ok)
+	{
+		covariance_ok = covariance_matrix.rows() == column &&
+			covariance_matrix.cols() == column && covariance_matrix.allFinite();
+		for (int i = 0; covariance_ok && i < column; ++i)
+			if (covariance_matrix(i, i) < -1e-10)
+				covariance_ok = false;
+	}
 
 	posterior_prof_sw.reset();
     if (covariance_ok)
+    {
         gnss_info->constructEqu_fromCeres(covariance_matrix);
+        gnss_info->covariance_source = covariance_is_pseudoinverse
+            ? GNSSCovarianceSource::CERES_PSEUDOINVERSE
+            : GNSSCovarianceSource::CERES_FULL_RANK;
+		if (covariance_is_pseudoinverse && _spdlog)
+			_spdlog->warn(
+				"PPP FGO RAW: sparse covariance was rank deficient; using a "
+				"Ceres dense-SVD pseudoinverse and disabling covariance-trusted feedback");
+    }
     else
     {
         if (_spdlog)
@@ -6274,6 +6450,8 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP_RAW(ceres::Problem &problem)
                     : "PPP FGO RAW: parameter block association incomplete or "
                       "inconsistent; using the equation fallback for outlier normalization");
         gnss_info->constructEqu_fromCeres(Eigen::MatrixXd());
+        gnss_info->covariance_source =
+            GNSSCovarianceSource::REGULARIZED_EQUATION_FALLBACK;
     }
 	_fgo_prof.raw_equation.add(posterior_prof_sw.ms());
 
