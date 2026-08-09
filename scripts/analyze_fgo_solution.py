@@ -647,8 +647,10 @@ def format_epoch(value: Optional[float], nominal_start: float) -> str:
 def markdown_report(report: Dict[str, object]) -> str:
     config = report["configuration"]
     nominal_start = float(config["nominal_start_sow"])
+    hours = float(config["hours"])
+    span_label = "全天" if math.isclose(hours, 24.0) else f"{hours:g} 小时"
     lines = [
-        f"# {report['site']} FGO/FLT 全天分析",
+        f"# {report['site']} FGO/FLT {span_label}分析",
         "",
         (
             f"参考坐标 ECEF: `{config['reference_ecef_m']}`；期望采样间隔 "

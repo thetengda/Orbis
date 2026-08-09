@@ -716,7 +716,7 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 					_output_float_ambiguity_solution();
 					if (_spdlog)
 						_spdlog->warn(
-							"PPP RAW ambiguity feedback {} rejected at {}; resolver, filter, graph and unified FGO output restored to float",
+							"PPP RAW ambiguity feedback {} rejected at {}; resolver and filter rolled back, previous accepted graph state retained",
 							ambiguity_feedback_mode_name(_ambiguity_feedback_mode),
 							_epoch.str_ymdhms());
 				}
@@ -3145,7 +3145,8 @@ bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
     const std::vector<great::FixedAmbiguityConstraint> &source,
     std::map<RawConstraintKey, RawFixedConstraint> &pending,
     std::map<RawConstraintKey, RawFixedConstraint> &candidates,
-    std::set<RawConstraintKey> &obsolete)
+    std::set<RawConstraintKey> &obsolete,
+	const std::set<RawConstraintKey> *allowed_candidates)
 {
     pending.clear();
 	candidates.clear();
@@ -3311,6 +3312,20 @@ bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
             return false;
         candidates[key] = constraint;
     }
+	// A statistical subset must drive topology itself; filtering pending edges
+	// later would leave obsolete edges computed from the rejected full batch.
+	if (allowed_candidates)
+	{
+		for (auto candidate = candidates.begin(); candidate != candidates.end();)
+		{
+			if (allowed_candidates->count(candidate->first) == 0)
+				candidate = candidates.erase(candidate);
+			else
+				++candidate;
+		}
+		if (candidates.empty())
+			return false;
+	}
 
 	// A reference-satellite change can express the same fixed component with a
 	// different spanning tree.  Treat old explicit edges inside a component
@@ -4076,12 +4091,15 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
 {
     if (!_ambfix || !_raw_feedback_problem)
         return false;
+	_raw_feedback_partial_candidate = false;
 
     map<RawConstraintKey, RawFixedConstraint> pending;
 	map<RawConstraintKey, RawFixedConstraint> candidates;
 	set<RawConstraintKey> obsolete;
-    if (!_translate_RAW_fixed_constraints(
-			_ambfix->fixedConstraints(), pending, candidates, obsolete))
+	const vector<great::FixedAmbiguityConstraint> &source =
+		_ambfix->fixedConstraints();
+	if (!_translate_RAW_fixed_constraints(
+			source, pending, candidates, obsolete))
 	{
 		if (_spdlog)
 			_spdlog->warn("PPP RAW constraint translation rejected the current fixed candidate");
@@ -4094,9 +4112,14 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
 	double nis = 0.0;
 	int degrees_of_freedom = 0;
 	double chi_square_limit = 0.0;
+	const size_t original_candidate_count = candidates.size();
+	map<RawConstraintKey, RawFixedConstraint> selected_candidates;
+	map<RawConstraintKey, RawFixedConstraint> *selection =
+		_ambfix->partialFixEnabled() ? &selected_candidates : nullptr;
 	if (!gate_info || !_validate_RAW_candidate_statistics(
 			candidates, *gate_info, gate_parameters,
-			nis, degrees_of_freedom, chi_square_limit))
+			nis, degrees_of_freedom, chi_square_limit, selection,
+			_ambfix->minimumPartialFixCount()))
 	{
 		if (_spdlog)
 			_spdlog->warn(
@@ -4104,6 +4127,26 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
 				nis, degrees_of_freedom, chi_square_limit);
 		return false;
 	}
+	if (selection && selected_candidates.size() < original_candidate_count)
+	{
+		set<RawConstraintKey> allowed;
+		for (const auto &candidate : selected_candidates)
+			allowed.insert(candidate.first);
+		if (!_translate_RAW_fixed_constraints(
+				source, pending, candidates, obsolete, &allowed))
+		{
+			if (_spdlog)
+				_spdlog->warn(
+					"PPP RAW CONSTRAINT partial candidate topology rebuild failed");
+			return false;
+		}
+		_raw_feedback_partial_candidate = true;
+	}
+	int nonlinear_subset_retries = 0;
+	// Every retry starts from the rolled-back graph and rebuilds the complete
+	// retained/obsolete/pending forest for the smaller candidate set.
+	while (true)
+	{
 
     if (pending.empty() && obsolete.empty())
     {
@@ -4221,6 +4264,7 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
 	for (const auto &entry : pending)
 		expected_constraints[entry.first] = entry.second;
 	const char *failure_stage = nullptr;
+	bool original_cost_rejected = false;
 	if (!_solve_PPP_RAW_problem(problem, summary))
 		failure_stage = "Ceres re-optimization";
 	else if (!feedback_solve_converged(summary))
@@ -4242,7 +4286,10 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
 				(std::max)(0.0, 2.0 * (conditioned_cost - float_cost));
 			if (!std::isfinite(cost_increase) ||
 				cost_increase > chi_square_limit)
+			{
 				failure_stage = "original-graph cost gate";
+				original_cost_rejected = true;
+			}
 		}
 	}
 	if (!failure_stage && !_rebuild_RAW_posterior_transactional(problem))
@@ -4250,6 +4297,67 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
 	if (failure_stage)
     {
         rollback();
+		const int minimum_count = (std::max)(
+			1, _ambfix->minimumPartialFixCount());
+		if (original_cost_rejected && _ambfix->partialFixEnabled() &&
+			static_cast<int>(candidates.size()) > minimum_count)
+		{
+			RawConstraintKey best_key;
+			bool found = false;
+			double best_ratio = std::numeric_limits<double>::infinity();
+			double best_nis = 0.0;
+			int best_df = 0;
+			double best_limit = 0.0;
+			for (const auto &removable : candidates)
+			{
+				map<RawConstraintKey, RawFixedConstraint> trial = candidates;
+				trial.erase(removable.first);
+				if (static_cast<int>(trial.size()) < minimum_count)
+					continue;
+				double trial_nis = 0.0;
+				int trial_df = 0;
+				double trial_limit = 0.0;
+				if (!_validate_RAW_candidate_statistics(
+						trial, *gate_info, gate_parameters,
+						trial_nis, trial_df, trial_limit))
+					continue;
+				const double ratio = trial_nis / trial_limit;
+				if (ratio < best_ratio)
+				{
+					best_key = removable.first;
+					found = true;
+					best_ratio = ratio;
+					best_nis = trial_nis;
+					best_df = trial_df;
+					best_limit = trial_limit;
+				}
+			}
+			if (found)
+			{
+				set<RawConstraintKey> allowed;
+				for (const auto &candidate : candidates)
+					if (candidate.first != best_key)
+						allowed.insert(candidate.first);
+				// Recompute reference-star replacements and prior connectivity after
+				// removing the statistically least compatible equation.
+				if (_translate_RAW_fixed_constraints(
+						source, pending, candidates, obsolete, &allowed))
+				{
+					nis = best_nis;
+					degrees_of_freedom = best_df;
+					chi_square_limit = best_limit;
+					_raw_feedback_partial_candidate = true;
+					++nonlinear_subset_retries;
+					if (_spdlog)
+						_spdlog->info(
+							"PPP RAW CONSTRAINT original-graph cost retry rebuilt topology: retry={} selected={} previous_delta={:.3f} new_linear_NIS={:.3f}/{} limit={:.3f}",
+							nonlinear_subset_retries, candidates.size(),
+							cost_increase, nis, degrees_of_freedom,
+							chi_square_limit);
+					continue;
+				}
+			}
+		}
 		if (_spdlog)
 			_spdlog->warn("PPP RAW constraint feedback failed during {}", failure_stage);
         return false;
@@ -4265,12 +4373,15 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
     _graph_ambiguity_fixed = true;
     if (_spdlog)
 		_spdlog->info(
-			"PPP RAW CONSTRAINT feedback accepted at {}: {} equation(s) retired, {} equation(s) installed, {} explicit equation(s), NIS={:.3f}/{} delta_cost={:.3f} limit={:.3f}, {}",
+			"PPP RAW CONSTRAINT feedback accepted at {}: {} equation(s) retired, {} equation(s) installed, {} explicit equation(s), selected_candidates={}/{} partial={} nonlinear_subset_retries={}, NIS={:.3f}/{} delta_cost={:.3f} limit={:.3f}, {}",
 			_epoch.str_ymdhms(), obsolete.size(), pending.size(),
-			_raw_fixed_constraints.size(), nis, degrees_of_freedom,
+			_raw_fixed_constraints.size(), candidates.size(),
+			original_candidate_count, _raw_feedback_partial_candidate,
+			nonlinear_subset_retries, nis, degrees_of_freedom,
 			cost_increase, chi_square_limit,
             summary.BriefReport());
     return true;
+	}
 }
 
 /**

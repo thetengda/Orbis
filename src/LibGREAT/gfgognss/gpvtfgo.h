@@ -423,7 +423,8 @@ namespace gfgomsf
 			const std::vector<great::FixedAmbiguityConstraint> &source,
 			std::map<RawConstraintKey, RawFixedConstraint> &pending,
 			std::map<RawConstraintKey, RawFixedConstraint> &candidates,
-			std::set<RawConstraintKey> &obsolete);
+			std::set<RawConstraintKey> &obsolete,
+			const std::set<RawConstraintKey> *allowed_candidates = nullptr);
 		bool _validate_RAW_constraint_values(
 			const std::map<RawConstraintKey, RawFixedConstraint> &constraints) const;
 		bool _validate_RAW_candidate_statistics(

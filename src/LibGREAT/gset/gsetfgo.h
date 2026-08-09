@@ -18,9 +18,6 @@
 
 #define XMLKEY_FGO "fgo"
 
-#define WINDOW_SIZE 10
-#define NUM_OF_F 10000
-
 using namespace std;
 using namespace gnut;
 

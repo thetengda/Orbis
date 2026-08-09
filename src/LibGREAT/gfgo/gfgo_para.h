@@ -14,11 +14,13 @@
 #include "gset/gsetfgo.h"
 #include <Eigen/Dense>
 #include "gexport/ExportLibGREAT.h"
+// These capacities define exported estimator storage. Keep one definition so
+// include order cannot silently change class layout across library boundaries.
 #define WINDOW_SIZE 20
 #define NUM_OF_F 1000
 #define GWINDOW_SIZE 20  //for GNSS epoch sliding window
 #define GINS_WINDOW_SIZE 20  //for GNSS/INS  sliding window
-#define NUM_OF_ARC 10000  //for ambiguity arc 
+#define NUM_OF_ARC 10000  //for ambiguity arc
 
 namespace gfgo
 {
