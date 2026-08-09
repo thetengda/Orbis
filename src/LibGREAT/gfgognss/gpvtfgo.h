@@ -114,6 +114,8 @@ namespace gfgomsf
 			double coefficient_b = 0.0;
 			double target = 0.0;
 			double sqrt_information = 0.0;
+			bool integer_relation_valid = false;
+			double integer_target = 0.0;
 			t_gtime fixed_epoch;
 		};
 
@@ -271,6 +273,10 @@ namespace gfgomsf
 		t_gallpar _raw_float_search_parameters;
 		std::set<int> _raw_feedback_problem_ambiguities;
 		std::map<RawConstraintKey, RawFixedConstraint> _raw_fixed_constraints;
+		// Candidate history validates PARAMETER branch continuity only; it is
+		// never installed as a factor or represented by the marginalization prior.
+		std::map<RawConstraintKey, RawFixedConstraint> _raw_parameter_constraint_history;
+		bool _raw_parameter_history_confirmed = false;
 		// Provenance for integer equations already absorbed into the current
 		// marginalization prior. Explicit equations remain in the map above.
 		std::map<RawConstraintKey, RawFixedConstraint> _raw_prior_fixed_constraint_history;
@@ -427,6 +433,9 @@ namespace gfgomsf
 			const std::set<RawConstraintKey> *allowed_candidates = nullptr);
 		bool _validate_RAW_constraint_values(
 			const std::map<RawConstraintKey, RawFixedConstraint> &constraints) const;
+		bool _validate_RAW_parameter_integer_history(
+			const std::map<RawConstraintKey, RawFixedConstraint> &constraints,
+			double &inconsistency, int &cycle_count) const;
 		bool _validate_RAW_candidate_statistics(
 			const std::map<RawConstraintKey, RawFixedConstraint> &constraints,
 			const GNSSInfo &float_info, t_gallpar &float_parameters,

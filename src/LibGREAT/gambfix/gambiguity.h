@@ -48,6 +48,9 @@ namespace great
         double coefficient_b = 0.0;
         double target = 0.0;
         double information = 0.0;
+		// Product-independent integer relation used for cross-epoch validation.
+		bool integer_relation_valid = false;
+		double integer_target = 0.0;
     };
 
     /**

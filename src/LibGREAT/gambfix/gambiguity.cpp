@@ -2541,6 +2541,9 @@ namespace great
             constraint.coefficient_b = Bb;
             constraint.target = integer;
             constraint.information = p0;
+			constraint.integer_relation_valid =
+				!constraint.satellite_a.empty() && constraint.satellite_a[0] != 'R';
+			constraint.integer_target = itdd->inl;
             _pending_fixed_constraints.push_back(constraint);
 
             Matrix B_mat;
@@ -2609,6 +2612,8 @@ namespace great
 				std::fabs(constraint.coefficient_b) <= 1e-15 ||
                 !std::isfinite(constraint.target) ||
                 !std::isfinite(constraint.information) ||
+				(constraint.integer_relation_valid &&
+				 !std::isfinite(constraint.integer_target)) ||
                 constraint.information <= 0.0)
                 return false;
 

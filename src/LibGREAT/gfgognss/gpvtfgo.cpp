@@ -11,6 +11,7 @@
 
 #include "gpvtfgo.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -811,6 +812,8 @@ void gfgomsf::t_gpvtfgo::clearWindow()
 {
 	_reset_RAW_feedback_problem();
 	_raw_fixed_constraints.clear();
+	_raw_parameter_constraint_history.clear();
+	_raw_parameter_history_confirmed = false;
 	_raw_prior_fixed_constraint_history.clear();
 	_raw_posterior_scalar_addresses.clear();
 	_raw_posterior_scalar_ambiguity_ids.clear();
@@ -3326,7 +3329,10 @@ bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
 		return std::fabs(left.coefficient_a - right.coefficient_a) <= 1e-12 &&
 		       std::fabs(left.coefficient_b - right.coefficient_b) <= 1e-12 &&
 		       std::fabs(left.target - right.target) <= 1e-8 &&
-		       std::fabs(left.sqrt_information - right.sqrt_information) <= 1e-8;
+		       std::fabs(left.sqrt_information - right.sqrt_information) <= 1e-8 &&
+		       left.integer_relation_valid == right.integer_relation_valid &&
+		       (!left.integer_relation_valid ||
+		        std::fabs(left.integer_target - right.integer_target) <= 1e-8);
 	};
 
     // Canonicalize this epoch's accepted equations before inspecting old
@@ -3345,6 +3351,8 @@ bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
             std::fabs(fixed.coefficient_a) <= 1e-15 ||
             std::fabs(fixed.coefficient_b) <= 1e-15 ||
             !std::isfinite(fixed.target) ||
+			(fixed.integer_relation_valid &&
+			 !std::isfinite(fixed.integer_target)) ||
             !std::isfinite(fixed.information) || fixed.information <= 0.0)
             return false;
 
@@ -3385,20 +3393,24 @@ bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
         constraint.amb_b = amb_b;
         constraint.coefficient_a = fixed.coefficient_a;
         constraint.coefficient_b = fixed.coefficient_b;
-        constraint.target = fixed.target;
-        constraint.sqrt_information = std::sqrt(fixed.information);
-        constraint.fixed_epoch = _epoch;
+		constraint.target = fixed.target;
+		constraint.sqrt_information = std::sqrt(fixed.information);
+		constraint.integer_relation_valid = fixed.integer_relation_valid;
+		constraint.integer_target = fixed.integer_target;
+		constraint.fixed_epoch = _epoch;
         if (constraint.amb_b < constraint.amb_a)
         {
             std::swap(constraint.amb_a, constraint.amb_b);
             std::swap(constraint.coefficient_a, constraint.coefficient_b);
         }
-        if (constraint.coefficient_a < 0.0)
-        {
+		if (constraint.coefficient_a < 0.0)
+		{
             constraint.coefficient_a = -constraint.coefficient_a;
             constraint.coefficient_b = -constraint.coefficient_b;
-            constraint.target = -constraint.target;
-        }
+			constraint.target = -constraint.target;
+			if (constraint.integer_relation_valid)
+				constraint.integer_target = -constraint.integer_target;
+		}
         const RawConstraintKey key(constraint.amb_a, constraint.amb_b);
 
         const auto duplicate = candidates.find(key);
@@ -3612,6 +3624,58 @@ bool gfgomsf::t_gpvtfgo::_validate_RAW_constraint_values(
 		}
 	}
 	return true;
+}
+
+bool gfgomsf::t_gpvtfgo::_validate_RAW_parameter_integer_history(
+	const std::map<RawConstraintKey, RawFixedConstraint> &constraints,
+	double &inconsistency, int &cycle_count) const
+{
+	inconsistency = 0.0;
+	cycle_count = 0;
+	vector<const RawFixedConstraint *> equations;
+	set<int> ambiguity_ids;
+	auto append = [&](const map<RawConstraintKey, RawFixedConstraint> &source)
+	{
+		for (const auto &entry : source)
+		{
+			const RawFixedConstraint &constraint = entry.second;
+			if (!constraint.integer_relation_valid ||
+				_raw_feedback_problem_ambiguities.count(constraint.amb_a) == 0 ||
+				_raw_feedback_problem_ambiguities.count(constraint.amb_b) == 0)
+				continue;
+			equations.push_back(&constraint);
+			ambiguity_ids.insert(constraint.amb_a);
+			ambiguity_ids.insert(constraint.amb_b);
+		}
+	};
+	append(_raw_parameter_constraint_history);
+	const size_t historical_rows = equations.size();
+	append(constraints);
+	if (historical_rows == 0 || equations.size() == historical_rows)
+		return true;
+
+	map<int, int> columns;
+	for (int ambiguity_id : ambiguity_ids)
+		columns[ambiguity_id] = static_cast<int>(columns.size());
+	Eigen::MatrixXd design = Eigen::MatrixXd::Zero(
+		static_cast<int>(equations.size()), static_cast<int>(columns.size()));
+	Eigen::VectorXd targets(static_cast<int>(equations.size()));
+	for (size_t row = 0; row < equations.size(); ++row)
+	{
+		const RawFixedConstraint &constraint = *equations[row];
+		design(static_cast<int>(row), columns[constraint.amb_a]) = 1.0;
+		design(static_cast<int>(row), columns[constraint.amb_b]) = -1.0;
+		targets(static_cast<int>(row)) = constraint.integer_target;
+	}
+	Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> decomposition(design);
+	cycle_count = static_cast<int>(equations.size()) - decomposition.rank();
+	if (cycle_count <= 0)
+		return true;
+	const Eigen::VectorXd residual = design * decomposition.solve(targets) - targets;
+	if (!residual.allFinite())
+		return false;
+	inconsistency = residual.norm();
+	return inconsistency <= 1e-6 * std::sqrt(static_cast<double>(cycle_count));
 }
 
 bool gfgomsf::t_gpvtfgo::_validate_RAW_candidate_statistics(
@@ -3968,6 +4032,50 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 	}
 	if (pending.empty())
 		return false;
+	for (auto it = _raw_parameter_constraint_history.begin();
+		 it != _raw_parameter_constraint_history.end();)
+	{
+		const RawFixedConstraint &constraint = it->second;
+		if (_raw_feedback_problem_ambiguities.count(constraint.amb_a) == 0 ||
+			_raw_feedback_problem_ambiguities.count(constraint.amb_b) == 0)
+			it = _raw_parameter_constraint_history.erase(it);
+		else
+			++it;
+	}
+	if (_raw_parameter_constraint_history.empty())
+	{
+		_raw_parameter_constraint_history = pending;
+		_raw_parameter_history_confirmed = false;
+		if (_spdlog)
+			_spdlog->info(
+				"PPP RAW PARAMETER candidate is awaiting cross-epoch integer confirmation");
+		return false;
+	}
+	double integer_inconsistency = 0.0;
+	int integer_cycle_count = 0;
+	const bool integer_consistent =
+		_validate_RAW_parameter_integer_history(
+			pending, integer_inconsistency, integer_cycle_count);
+	if (integer_cycle_count <= 0)
+	{
+		_raw_parameter_constraint_history = pending;
+		_raw_parameter_history_confirmed = false;
+		if (_spdlog)
+			_spdlog->info(
+				"PPP RAW PARAMETER candidate is awaiting an overlapping integer path");
+		return false;
+	}
+	if (!integer_consistent)
+	{
+		if (!_raw_parameter_history_confirmed)
+			_raw_parameter_constraint_history = pending;
+		if (_spdlog)
+			_spdlog->warn(
+				"PPP RAW PARAMETER candidate rejected by integer-branch continuity: residual={:.6f} cycles={} confirmed_history={}",
+				integer_inconsistency, integer_cycle_count,
+				_raw_parameter_history_confirmed);
+		return false;
+	}
 	_raw_feedback_partial_candidate =
 		candidates.size() < original_candidate_count;
 
@@ -3982,6 +4090,38 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 	}
 	const t_gallpar float_parameters = _all_para_win;
 	const bool previously_constrained = _graph_ambiguity_fixed;
+	std::array<int, 3> coordinate_columns{{-1, -1, -1}};
+	Eigen::Vector3d float_coordinate;
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		float_coordinate(axis) = _para_CRD[_rover_count][axis];
+		for (size_t column = 0;
+			 column < _raw_posterior_scalar_addresses.size(); ++column)
+		{
+			if (_raw_posterior_scalar_addresses[column] ==
+				_para_CRD[_rover_count] + axis)
+			{
+				coordinate_columns[axis] = static_cast<int>(column);
+				break;
+			}
+		}
+	}
+	const bool coordinate_gate_ready =
+		coordinate_columns[0] >= 0 && coordinate_columns[1] >= 0 &&
+		coordinate_columns[2] >= 0 && _last_gnss_info->Qx.rows() ==
+			static_cast<int>(_all_para_win.parNumber()) &&
+		_last_gnss_info->Qx.cols() ==
+			static_cast<int>(_all_para_win.parNumber());
+	Eigen::Matrix3d float_coordinate_covariance = Eigen::Matrix3d::Zero();
+	if (coordinate_gate_ready)
+	{
+		for (int row = 0; row < 3; ++row)
+			for (int column = 0; column < 3; ++column)
+				float_coordinate_covariance(row, column) = _last_gnss_info->Qx(
+					coordinate_columns[row], coordinate_columns[column]);
+		float_coordinate_covariance = 0.5 *
+			(float_coordinate_covariance + float_coordinate_covariance.transpose());
+	}
 
 	vector<ceres::ResidualBlockId> original_residuals;
 	problem.GetResidualBlocks(&original_residuals);
@@ -4000,6 +4140,8 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 	};
 	ceres::Solver::Summary summary;
 	double cost_increase = std::numeric_limits<double>::quiet_NaN();
+	double coordinate_nis = std::numeric_limits<double>::quiet_NaN();
+	const double coordinate_nis_limit = 11.344866730144373; // chi-square(3, 99%)
 	int nonlinear_subset_retries = 0;
 	while (true)
 	{
@@ -4031,12 +4173,38 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 			failure_stage = "Ceres convergence gate";
 		else if (!_validate_RAW_constraint_values(candidates))
 			failure_stage = "candidate-equation validation";
+		else if (!coordinate_gate_ready ||
+			 !float_coordinate_covariance.allFinite())
+			failure_stage = "coordinate-update covariance association";
+		else
+		{
+			const Eigen::Vector3d coordinate_update(
+				_para_CRD[_rover_count][0] - float_coordinate(0),
+				_para_CRD[_rover_count][1] - float_coordinate(1),
+				_para_CRD[_rover_count][2] - float_coordinate(2));
+			Eigen::LDLT<Eigen::Matrix3d> decomposition(
+				float_coordinate_covariance);
+			if (decomposition.info() != Eigen::Success ||
+				(decomposition.vectorD().array() <= 0.0).any())
+			{
+				failure_stage = "coordinate-update covariance factorization";
+			}
+			else
+			{
+				coordinate_nis = coordinate_update.dot(
+					decomposition.solve(coordinate_update));
+				if (!std::isfinite(coordinate_nis) || coordinate_nis < 0.0 ||
+					coordinate_nis > coordinate_nis_limit)
+					failure_stage = "coordinate-update chi-square gate";
+			}
+		}
 		if (failure_stage)
 		{
 			if (_spdlog)
 				_spdlog->warn(
-					"PPP RAW PARAMETER feedback failed during {}: {}",
-					failure_stage, summary.BriefReport());
+					"PPP RAW PARAMETER feedback failed during {}: coordinate_NIS={} limit={:.3f}, {}",
+					failure_stage, coordinate_nis, coordinate_nis_limit,
+					summary.BriefReport());
 			rollback_attempt(temporary_constraints);
 			return false;
 		}
@@ -4118,28 +4286,31 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 					nis, degrees_of_freedom, chi_square_limit);
 			continue;
 		}
+		// PARAMETER conditions only the state.  Remove the temporary integer
+		// factors before rebuilding the posterior so they cannot leak into the
+		// next marginalization prior without constraint provenance.
+		for (ceres::ResidualBlockId residual : temporary_constraints)
+			problem.RemoveResidualBlock(residual);
+		temporary_constraints.clear();
 		if (!_rebuild_RAW_posterior_transactional(problem))
 		{
 			rollback_attempt(temporary_constraints);
 			return false;
 		}
-
-		// PARAMETER is a one-epoch conditioning mode: publish the graph-native
-		// conditional state and covariance, but do not retain integer factors in
-		// the next window. CONSTRAINT is the persistent information mode.
-		for (ceres::ResidualBlockId residual : temporary_constraints)
-			problem.RemoveResidualBlock(residual);
 		break;
 	}
 	_double_to_vector();
+	_raw_parameter_constraint_history = pending;
+	_raw_parameter_history_confirmed = true;
 	_graph_ambiguity_fixed = true;
 	if (_spdlog)
 		_spdlog->info(
-			"PPP RAW PARAMETER graph conditioning accepted at {}: equations={} selected_candidates={}/{} partial={} nonlinear_subset_retries={} NIS={:.3f}/{} delta_cost={:.3f} limit={:.3f}, {}",
+			"PPP RAW PARAMETER graph conditioning accepted at {}: equations={} selected_candidates={}/{} partial={} nonlinear_subset_retries={} NIS={:.3f}/{} delta_cost={:.3f} limit={:.3f} coordinate_NIS={:.3f}/{:.3f}, {}",
 			_epoch.str_ymdhms(), pending.size(), candidates.size(),
 			original_candidate_count, _raw_feedback_partial_candidate,
 			nonlinear_subset_retries, nis, degrees_of_freedom,
-			cost_increase, chi_square_limit, summary.BriefReport());
+			cost_increase, chi_square_limit, coordinate_nis,
+			coordinate_nis_limit, summary.BriefReport());
 	return true;
 }
 
