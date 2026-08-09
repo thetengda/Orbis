@@ -85,8 +85,6 @@ namespace great
 
     t_gambiguity::t_gambiguity()
     {
-        _pdE = nullptr;
-        _pdC = nullptr;
         _ratiofile = nullptr;
         _bootfile = nullptr;
         _ewl_Upd_time = t_gtime(EWL_IDENTIFY);
@@ -163,16 +161,6 @@ namespace great
                 _bootfile->close();
             delete _bootfile;
             _bootfile = nullptr;
-        }
-        if (_pdE)
-        {
-            delete _pdE;
-            _pdE = nullptr;
-        }
-        if (_pdC)
-        {
-            delete _pdC;
-            _pdC = nullptr;
         }
     }
 
@@ -602,8 +590,6 @@ namespace great
 
         const string strCprogName = "check_amb_depend";
         const double dEPS = 1e-12;
-        static int iNdim_ow = 0;
-        static int iNdim_for_check = 0;
         int i, j;
         const double dOper[4] = {1.0, -1.0, -1.0, 1.0};
         double dC_dot;
@@ -613,30 +599,25 @@ namespace great
         {
             if (isFirst)
             {
-                if (_pdE)
-                {
-                    delete _pdE;
-                    _pdE = nullptr;
-                }
-                if (_pdC)
-                {
-                    delete _pdC;
-                    _pdC = nullptr;
-                }
-
-                _pdE = new double[iMaxamb_ow * (iMaxamb_for_check + 1 + 100)];
-                _pdC = new double[iMaxamb_for_check + 1 + 100];
-                if (iMaxamb_ow == 0 || iMaxamb_for_check == 0)
+                if (iMaxamb_ow <= 0 || iMaxamb_for_check <= 0)
                 {
                     string err = "***ERROR: memory allocatation for e&c ";
                     throw err;
                 }
-                iNdim_ow = iMaxamb_ow;
-                iNdim_for_check = iMaxamb_for_check;
+                _pdE_rows = iMaxamb_ow;
+                _pdE_columns = iMaxamb_for_check + 1 + 100;
+                _pdE_max_independent = iMaxamb_for_check;
+                _pdE.assign(static_cast<size_t>(_pdE_rows) *
+                                static_cast<size_t>(_pdE_columns),
+                            0.0);
+                _pdC.assign(static_cast<size_t>(_pdE_columns), 0.0);
                 return false;
             }
 
-            if (*iNdef >= iNdim_for_check)
+            if (!iNdef || !arriIpt2ow || _pdE.empty() || _pdC.empty() ||
+                iNamb <= 0 || iNamb > _pdE_rows ||
+                iN_oneway <= 0 || iN_oneway > 4 ||
+                *iNdef < 0 || *iNdef >= _pdE_max_independent)
             {
                 string err2 = "***ERROR: independent ones already reaches the allocated memory ";
                 throw err2;
@@ -648,12 +629,12 @@ namespace great
                 _pdC[i] = 0.0;
                 for (j = 0; j < iN_oneway; j++)
                 {
-                    if (arriIpt2ow[j] > iNdim_ow)
+                    if (arriIpt2ow[j] <= 0 || arriIpt2ow[j] > _pdE_rows)
                     {
                         string err3 = "***ERROR: base element beyond the allocated memory ";
                         throw err3;
                     }
-                    _pdC[i] = _pdC[i] + _pdE[(arriIpt2ow[j] - 1) * (iNdim_for_check + 1) + i] * dOper[j];
+                    _pdC[i] = _pdC[i] + _pdE[(arriIpt2ow[j] - 1) * _pdE_columns + i] * dOper[j];
                 }
                 dC_dot = dC_dot + _pdC[i] * _pdC[i];
             }
@@ -667,11 +648,11 @@ namespace great
 
             for (j = 0; j < iNamb; j++)
             {
-                _pdE[j * (iNdim_for_check + 1) + *iNdef] = 0.0;
+                _pdE[j * _pdE_columns + *iNdef] = 0.0;
             }
             for (j = 0; j < iN_oneway; j++)
             {
-                _pdE[(arriIpt2ow[j] - 1) * (iNdim_for_check + 1) + *iNdef] = dOper[j];
+                _pdE[(arriIpt2ow[j] - 1) * _pdE_columns + *iNdef] = dOper[j];
             }
 
             if (dC_dot > dEPS)
@@ -684,19 +665,19 @@ namespace great
                     }
                     for (j = 0; j < iNamb; j++)
                     {
-                        _pdE[j * (iNdim_for_check + 1) + *iNdef] = _pdE[j * (iNdim_for_check + 1) + *iNdef] - _pdC[i] * _pdE[j * (iNdim_for_check + 1) + i];
+                        _pdE[j * _pdE_columns + *iNdef] = _pdE[j * _pdE_columns + *iNdef] - _pdC[i] * _pdE[j * _pdE_columns + i];
                     }
                 }
 
                 dC_dot = 0.0;
                 for (j = 0; j < iNamb; j++)
                 {
-                    dC_dot = dC_dot + _pdE[j * (iNdim_for_check + 1) + *iNdef] * _pdE[j * (iNdim_for_check + 1) + *iNdef];
+                    dC_dot = dC_dot + _pdE[j * _pdE_columns + *iNdef] * _pdE[j * _pdE_columns + *iNdef];
                 }
                 dC_dot = sqrt(dC_dot);
                 for (j = 0; j < iNamb; j++)
                 {
-                    _pdE[j * (iNdim_for_check + 1) + *iNdef] = _pdE[j * (iNdim_for_check + 1) + *iNdef] / dC_dot;
+                    _pdE[j * _pdE_columns + *iNdef] = _pdE[j * _pdE_columns + *iNdef] / dC_dot;
                 }
             }
             else
@@ -704,7 +685,7 @@ namespace great
                 dC_dot = sqrt(iN_oneway * 1.0);
                 for (j = 0; j < iN_oneway; j++)
                 {
-                    _pdE[(arriIpt2ow[j] - 1) * (iNdim_for_check + 1) + *iNdef] = _pdE[(arriIpt2ow[j] - 1) * (iNdim_for_check + 1) + *iNdef] / dC_dot;
+                    _pdE[(arriIpt2ow[j] - 1) * _pdE_columns + *iNdef] = _pdE[(arriIpt2ow[j] - 1) * _pdE_columns + *iNdef] / dC_dot;
                 }
             }
 

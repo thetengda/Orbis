@@ -324,8 +324,11 @@ namespace great
         double _ratio;                         ///< threshold in LAMBDA method
         double _boot;                          ///< threshold of bootstrapping rate in amb fix
         double _min_common_time;               ///< the Minimum common time of two observation arc
-        double* _pdE = nullptr;                ///< pdE
-        double* _pdC = nullptr;                ///< pdC
+        vector<double> _pdE;                   ///< ambiguity-dependence basis
+        vector<double> _pdC;                   ///< ambiguity-dependence workspace
+        int _pdE_rows = 0;
+        int _pdE_columns = 0;
+        int _pdE_max_independent = 0;
         double _outRatio;                      ///< outRatio
         
         map<string, double> _map_EWL_decision; ///< deriation, sigma in WL/NL-cycle
