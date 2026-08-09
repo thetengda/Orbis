@@ -1704,26 +1704,41 @@ int great::t_gpvtflt::_amb_resolution()
     }
 
     // output the fixed result
-    ostringstream os;
     if (_amb_state) //fixed
     {
+		ostringstream os;
         _param_fixed = _ambfix->getFinalParams();
         _prtOut(_epoch, _param_fixed, _filter->Qx(), _data, os, line, true);
+		_output_amb_fixed(os.str());
 	}
     else
     {
-        for (unsigned int iPar = 0; iPar < _param_fixed.parNumber(); iPar++)
-        {
-            _param_fixed[iPar].value(_param_fixed[iPar].value() + dx_tmp(_param_fixed[iPar].index));
-        }
-        _prtOut(_epoch, _param_fixed, Qx_tmp, _data, os, line, true);
+		for (unsigned int iPar = 0; iPar < _param_fixed.parNumber(); iPar++)
+		{
+			_param_fixed[iPar].value(
+				_param_fixed[iPar].value() + dx_tmp(_param_fixed[iPar].index));
+		}
+		ostringstream os;
+		_prtOut(_epoch, _param_fixed, Qx_tmp, _data, os, line, true);
+		_output_amb_fixed(os.str());
     }
 
-    // Print the fixed (AR) result through the virtual output hook, so derived
-    // solvers (FGO) can route it to their own AR file instead of <flt>.
-    _output_amb_fixed(os.str());
-
     return 1;
+}
+
+void great::t_gpvtflt::_output_float_ambiguity_solution()
+{
+	if (!_filter)
+		return;
+	ColumnVector dx = _filter->dx();
+	SymmetricMatrix covariance = _filter->Qx();
+	_param_fixed = _filter->param();
+	for (unsigned int i = 0; i < _param_fixed.parNumber(); ++i)
+		_param_fixed[i].value(
+			_param_fixed[i].value() + dx(_param_fixed[i].index));
+	ostringstream output;
+	_prtOut(_epoch, _param_fixed, covariance, _data, output, line, true);
+	_output_amb_fixed(output.str());
 }
 
 void great::t_gpvtflt::_output_amb_fixed(const std::string &content)

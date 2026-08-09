@@ -262,6 +262,13 @@ namespace great
             return _fixed_constraints;
         }
 
+		/** Snapshot all resolver state that an epoch-level fixing attempt mutates. */
+		bool beginFeedbackTransaction();
+		/** Keep the state produced by the current fixing attempt. */
+		void commitFeedbackTransaction();
+		/** Restore the resolver state from before the current fixing attempt. */
+		bool rollbackFeedbackTransaction();
+
         /** @brief get DD. */
         t_DD_amb &getDD() { return _DD; } 
 
@@ -283,6 +290,59 @@ namespace great
         void setExcludedAmb(const set<pair<string, par_type>> &excluded) { _excluded_amb = excluded; }
         
     protected:
+		struct FeedbackTransactionState
+		{
+			OBSCOMBIN obstype;
+			t_gtime crt_time;
+			set<string> sat_refs;
+			set<pair<string, par_type>> excluded_amb;
+			t_DD_amb DD;
+			t_DD_amb DD_save;
+			map<string, map<int, double>> MW;
+			map<string, double> ELE;
+			map<string, map<FREQ_SEQ, double>> SNR;
+			map<string, map<string, map<string, bool>>> WL_flag;
+			map<string, map<string, map<string, bool>>> EWL_flag;
+			map<string, map<string, bool>> EWL24_flag;
+			map<string, map<string, bool>> EWL25_flag;
+			map<string, map<string, map<string, int>>> IWL;
+			map<string, map<string, map<string, int>>> IEWL;
+			map<string, map<string, int>> IEWL24;
+			map<string, map<string, int>> IEWL25;
+			bool part_fix;
+			double ratio;
+			vector<double> pdE;
+			vector<double> pdC;
+			int pdE_rows;
+			int pdE_columns;
+			int pdE_max_independent;
+			double out_ratio;
+			bool is_first;
+			bool is_first_nl;
+			bool is_first_wl;
+			bool is_first_ewl;
+			bool is_first_ewl24;
+			bool is_first_ewl25;
+			bool amb_fixed;
+			ColumnVector mDia;
+			t_gallpar param;
+			map<string, map<string, vector<FREQ_SEQ>>> amb_freqs;
+			t_gtime ewl_upd_time;
+			t_gtime ewl24_upd_time;
+			t_gtime ewl25_upd_time;
+			t_gtime wl_upd_time;
+			map<string, map<string, t_gtime>> last_fix_time;
+			map<string, map<string, int>> fix_epo_num;
+			map<string, int> lock_epo_num;
+			map<string, t_DD_amb> DD_previous;
+			map<string, map<string, int>> sats_index;
+			int total_amb_num;
+			int fixed_amb_num;
+			vector<FixedAmbiguityConstraint> pending_fixed_constraints;
+			vector<FixedAmbiguityConstraint> fixed_constraints;
+		};
+		unique_ptr<FeedbackTransactionState> _feedback_transaction;
+
         CONSTRPAR _crd_est; ///< _crd_est
         OBSCOMBIN _obstype; ///< UDUC/IF ambiguity fixing
         t_gtime _beg;       ///< begin epoch

@@ -250,6 +250,8 @@ namespace gfgomsf
 		ofstream _output_float_solution;//add for MultiWindow
 		ofstream _output_estimator_info;//add for MultiWindow
 		ofstream _output_ar_solution;//add for fgo ambiguity-resolved solution (separate from <flt>)
+		bool _defer_raw_ar_output = false;
+		std::string _deferred_raw_ar_output;
 
 		///< velocity of rover
 		double          _headers[GWINDOW_SIZE + 1];						    ///< header info of rover	
@@ -419,7 +421,6 @@ namespace gfgomsf
 		std::set<int> _raw_active_ifb_slots(int node) const;
 		void _add_RAW_fixed_constraints(ceres::Problem &problem,
 			const std::set<int> &problem_ambiguities);
-		bool _write_RAW_fixed_solution(t_gallpar &fixed_parameters);
 		bool _translate_RAW_fixed_constraints(
 			const std::vector<great::FixedAmbiguityConstraint> &source,
 			std::map<RawConstraintKey, RawFixedConstraint> &pending,
@@ -427,6 +428,15 @@ namespace gfgomsf
 			std::set<RawConstraintKey> &obsolete);
 		bool _validate_RAW_constraint_values(
 			const std::map<RawConstraintKey, RawFixedConstraint> &constraints) const;
+		bool _validate_RAW_candidate_statistics(
+			const std::map<RawConstraintKey, RawFixedConstraint> &constraints,
+			const GNSSInfo &float_info, t_gallpar &float_parameters,
+			double &nis, int &degrees_of_freedom,
+			double &chi_square_limit) const;
+		bool _evaluate_RAW_problem_cost(
+			ceres::Problem &problem,
+			const std::vector<ceres::ResidualBlockId> &residuals,
+			double &cost) const;
 		bool _apply_RAW_parameter_feedback();
 		bool _apply_RAW_constraint_feedback();
 		bool _rebuild_RAW_posterior_transactional(ceres::Problem &problem);

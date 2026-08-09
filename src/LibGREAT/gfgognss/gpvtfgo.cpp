@@ -39,7 +39,7 @@ namespace
         return model_q * graph_dt / stochastic_dt;
     }
 
-    const char *ambiguity_feedback_mode_name(gfgo::AMB_FEEDBACK_MODE mode)
+	const char *ambiguity_feedback_mode_name(gfgo::AMB_FEEDBACK_MODE mode)
     {
         switch (mode)
         {
@@ -61,6 +61,27 @@ namespace
                 std::chrono::steady_clock::now() - _t0).count();
         }
     };
+
+	double chi_square_999_limit(int degrees_of_freedom)
+	{
+		if (degrees_of_freedom <= 0)
+			return 0.0;
+		// Wilson-Hilferty approximation for the 99.9% chi-square quantile.
+		// It is slightly conservative for the small dimensions used by a
+		// per-epoch ambiguity spanning forest (df=1: 11.16 vs 10.83 exact).
+		const double k = static_cast<double>(degrees_of_freedom);
+		const double z_999 = 3.0902323061678132;
+		const double transformed =
+			1.0 - 2.0 / (9.0 * k) + z_999 * std::sqrt(2.0 / (9.0 * k));
+		return k * transformed * transformed * transformed;
+	}
+
+	bool feedback_solve_converged(const ceres::Solver::Summary &summary)
+	{
+		return (summary.termination_type == ceres::CONVERGENCE ||
+				summary.termination_type == ceres::USER_SUCCESS) &&
+			std::isfinite(summary.final_cost) && summary.final_cost >= 0.0;
+	}
 }
 
 
@@ -310,6 +331,8 @@ gfgomsf::t_gpvtfgo::~t_gpvtfgo()
 
 void gfgomsf::t_gpvtfgo::_reset_RAW_feedback_problem()
 {
+	_defer_raw_ar_output = false;
+	_deferred_raw_ar_output.clear();
 	_raw_feedback_problem.reset();
 	_raw_float_search_info.reset();
 	_raw_float_search_parameters.delAllParam();
@@ -364,6 +387,7 @@ void gfgomsf::t_gpvtfgo::_print_fgo_prof() const
 			<< std::setw(7) << r.stat->max_ms << " | "
 			<< std::setw(8) << r.stat->total_ms << std::endl;
 	}
+
 	if (_fgo_prof.raw_parameters.count != 0)
 	{
 		std::cerr << "  RAW graph averages: "
@@ -620,23 +644,61 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 			_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE;
 		if (raw_feedback)
 		{
-			if (_pre_amb_resolution())
-				_amb_resolution();
-			else
-				_amb_state = false;
-
-			if (_amb_state)
+			const bool ambiguity_ready = _pre_amb_resolution();
+			const bool transaction_started = ambiguity_ready && _ambfix &&
+				_ambfix->beginFeedbackTransaction();
+			std::unique_ptr<t_gflt> float_filter_snapshot;
+			if (transaction_started && _filter)
+				float_filter_snapshot.reset(new t_gflt(*_filter));
+			_defer_raw_ar_output = transaction_started;
+			_deferred_raw_ar_output.clear();
+			if (!ambiguity_ready)
 			{
-				const bool feedback_ok =
-					_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::PARAMETER
-						? _apply_RAW_parameter_feedback()
-						: _apply_RAW_constraint_feedback();
-				if (!feedback_ok && _spdlog)
-					_spdlog->warn(
-						"PPP RAW ambiguity feedback {} rejected at {}; retaining the last valid graph solution",
-						ambiguity_feedback_mode_name(_ambiguity_feedback_mode),
+				_amb_state = false;
+			}
+			else if (!transaction_started)
+			{
+				_amb_state = false;
+				if (_spdlog)
+					_spdlog->error(
+						"PPP RAW ambiguity feedback transaction could not be started at {}",
 						_epoch.str_ymdhms());
 			}
+			else
+			{
+				_amb_resolution();
+
+				const bool had_fixed_candidate = _amb_state;
+				bool feedback_ok = !had_fixed_candidate;
+				if (had_fixed_candidate)
+					feedback_ok =
+						_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::PARAMETER
+							? _apply_RAW_parameter_feedback()
+							: _apply_RAW_constraint_feedback();
+				if (had_fixed_candidate && !feedback_ok)
+				{
+					_ambfix->rollbackFeedbackTransaction();
+					if (float_filter_snapshot)
+						*_filter = *float_filter_snapshot;
+					_amb_state = false;
+					_deferred_raw_ar_output.clear();
+					_output_float_ambiguity_solution();
+					if (_spdlog)
+						_spdlog->warn(
+							"PPP RAW ambiguity feedback {} rejected at {}; resolver, filter, graph and AR output restored to float",
+							ambiguity_feedback_mode_name(_ambiguity_feedback_mode),
+							_epoch.str_ymdhms());
+				}
+				else
+				{
+					_ambfix->commitFeedbackTransaction();
+				}
+			}
+			_defer_raw_ar_output = false;
+			const string ar_output = _deferred_raw_ar_output;
+			_deferred_raw_ar_output.clear();
+			if (!ar_output.empty())
+				_output_amb_fixed(ar_output);
 			publish_foat();
 		}
 		else
@@ -985,6 +1047,11 @@ void gfgomsf::t_gpvtfgo::publish_foat()
 
 void gfgomsf::t_gpvtfgo::_output_amb_fixed(const std::string &content)
 {
+	if (_defer_raw_ar_output)
+	{
+		_deferred_raw_ar_output += content;
+		return;
+	}
     if (_output_ar_solution.good())
     {
         _output_ar_solution.write(content.c_str(), content.size());
@@ -3047,51 +3114,6 @@ void gfgomsf::t_gpvtfgo::_add_RAW_fixed_constraints(
     }
 }
 
-bool gfgomsf::t_gpvtfgo::_write_RAW_fixed_solution(
-    t_gallpar &fixed_parameters)
-{
-    const size_t parameter_count = _all_para_win.parNumber();
-    if (parameter_count == 0 || fixed_parameters.parNumber() != parameter_count ||
-        _raw_posterior_scalar_addresses.size() != parameter_count ||
-        _raw_posterior_scalar_ambiguity_ids.size() != parameter_count)
-        return false;
-
-    vector<double> values(parameter_count,
-                          std::numeric_limits<double>::quiet_NaN());
-    vector<bool> assigned(parameter_count, false);
-    for (unsigned int i = 0; i < fixed_parameters.parNumber(); ++i)
-    {
-        const t_gpar &fixed = fixed_parameters[i];
-        if (fixed.index <= 0 ||
-            fixed.index > static_cast<int>(parameter_count) ||
-            assigned[static_cast<size_t>(fixed.index - 1)] ||
-            !std::isfinite(fixed.value()))
-            return false;
-
-        const t_gpar &graph = _all_para_win[fixed.index - 1];
-        if (fixed.parType != graph.parType || fixed.prn != graph.prn)
-            return false;
-        assigned[static_cast<size_t>(fixed.index - 1)] = true;
-        values[static_cast<size_t>(fixed.index - 1)] = fixed.value();
-    }
-
-    for (size_t i = 0; i < parameter_count; ++i)
-    {
-        if (!assigned[i] || !_raw_posterior_scalar_addresses[i] ||
-            !std::isfinite(values[i]))
-            return false;
-    }
-
-    // Validation is complete; publish the whole conditional solution in one
-    // transaction, including coordinates, clocks, atmosphere, ISBs and SION.
-    for (size_t i = 0; i < parameter_count; ++i)
-    {
-        *_raw_posterior_scalar_addresses[i] = values[i];
-        _all_para_win[static_cast<unsigned int>(i)].value(values[i]);
-    }
-    return true;
-}
-
 bool gfgomsf::t_gpvtfgo::_translate_RAW_fixed_constraints(
     const std::vector<great::FixedAmbiguityConstraint> &source,
     std::map<RawConstraintKey, RawFixedConstraint> &pending,
@@ -3441,6 +3463,110 @@ bool gfgomsf::t_gpvtfgo::_validate_RAW_constraint_values(
 	return true;
 }
 
+bool gfgomsf::t_gpvtfgo::_validate_RAW_candidate_statistics(
+	const std::map<RawConstraintKey, RawFixedConstraint> &constraints,
+	const GNSSInfo &float_info, t_gallpar &float_parameters,
+	double &nis, int &degrees_of_freedom, double &chi_square_limit) const
+{
+	nis = std::numeric_limits<double>::quiet_NaN();
+	degrees_of_freedom = 0;
+	chi_square_limit = 0.0;
+	const size_t parameter_count = float_parameters.parNumber();
+	if (constraints.empty() ||
+		float_info.covariance_source != GNSSCovarianceSource::CERES_FULL_RANK ||
+		float_info.Qx.rows() != static_cast<int>(parameter_count) ||
+		float_info.Qx.cols() != static_cast<int>(parameter_count) ||
+		_raw_posterior_scalar_ambiguity_ids.size() != parameter_count)
+		return false;
+
+	map<int, int> ambiguity_columns;
+	for (size_t column = 0; column < parameter_count; ++column)
+	{
+		const int ambiguity_id = _raw_posterior_scalar_ambiguity_ids[column];
+		if (ambiguity_id >= 0)
+			ambiguity_columns[ambiguity_id] = static_cast<int>(column);
+	}
+
+	const int equation_count = static_cast<int>(constraints.size());
+	Eigen::MatrixXd design = Eigen::MatrixXd::Zero(
+		equation_count, static_cast<int>(parameter_count));
+	Eigen::VectorXd innovation(equation_count);
+	int row = 0;
+	for (const auto &entry : constraints)
+	{
+		const RawFixedConstraint &constraint = entry.second;
+		const auto column_a = ambiguity_columns.find(constraint.amb_a);
+		const auto column_b = ambiguity_columns.find(constraint.amb_b);
+		if (column_a == ambiguity_columns.end() ||
+			column_b == ambiguity_columns.end())
+			return false;
+		const double value_a =
+			float_parameters[static_cast<unsigned int>(column_a->second)].value();
+		const double value_b =
+			float_parameters[static_cast<unsigned int>(column_b->second)].value();
+		if (!std::isfinite(value_a) || !std::isfinite(value_b))
+			return false;
+		design(row, column_a->second) = constraint.coefficient_a;
+		design(row, column_b->second) = constraint.coefficient_b;
+		innovation(row) = constraint.target -
+			constraint.coefficient_a * value_a -
+			constraint.coefficient_b * value_b;
+		++row;
+	}
+
+	Eigen::MatrixXd innovation_covariance =
+		design * float_info.Qx * design.transpose();
+	innovation_covariance =
+		0.5 * (innovation_covariance + innovation_covariance.transpose());
+	if (!innovation_covariance.allFinite() || !innovation.allFinite())
+		return false;
+	Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> decomposition(
+		innovation_covariance);
+	if (decomposition.info() != Eigen::Success)
+		return false;
+	const Eigen::VectorXd eigenvalues = decomposition.eigenvalues();
+	const double largest = eigenvalues.size() > 0 ? eigenvalues.maxCoeff() : 0.0;
+	if (!std::isfinite(largest) || largest <= 0.0)
+		return false;
+	const double rank_tolerance = (std::max)(1e-12, largest * 1e-10);
+	Eigen::VectorXd inverse_values = Eigen::VectorXd::Zero(eigenvalues.size());
+	for (int i = 0; i < eigenvalues.size(); ++i)
+	{
+		if (eigenvalues(i) > rank_tolerance)
+		{
+			inverse_values(i) = 1.0 / eigenvalues(i);
+			++degrees_of_freedom;
+		}
+		else if (eigenvalues(i) < -rank_tolerance)
+		{
+			return false;
+		}
+	}
+	if (degrees_of_freedom <= 0)
+		return false;
+	const Eigen::VectorXd projected =
+		decomposition.eigenvectors().transpose() * innovation;
+	nis = (projected.array().square() * inverse_values.array()).sum();
+	chi_square_limit = chi_square_999_limit(degrees_of_freedom);
+	return std::isfinite(nis) && std::isfinite(chi_square_limit) &&
+		nis >= 0.0 && nis <= chi_square_limit;
+}
+
+bool gfgomsf::t_gpvtfgo::_evaluate_RAW_problem_cost(
+	ceres::Problem &problem,
+	const std::vector<ceres::ResidualBlockId> &residuals,
+	double &cost) const
+{
+	cost = std::numeric_limits<double>::quiet_NaN();
+	if (residuals.empty())
+		return false;
+	ceres::Problem::EvaluateOptions options;
+	options.apply_loss_function = true;
+	options.residual_blocks = residuals;
+	return problem.Evaluate(options, &cost, nullptr, nullptr, nullptr) &&
+		std::isfinite(cost) && cost >= 0.0;
+}
+
 bool gfgomsf::t_gpvtfgo::_RAW_graph_has_live_fixed_ambiguity() const
 {
 	// Residual IDs describe factors actually installed in the retained Ceres
@@ -3466,15 +3592,138 @@ bool gfgomsf::t_gpvtfgo::_RAW_graph_has_live_fixed_ambiguity() const
 
 bool gfgomsf::t_gpvtfgo::_apply_RAW_parameter_feedback()
 {
-    if (!_ambfix || !_write_RAW_fixed_solution(_param_fixed))
-        return false;
-    _double_to_vector();
-    _graph_ambiguity_fixed = true;
-    if (_spdlog)
-        _spdlog->info(
-            "PPP RAW PARAMETER feedback accepted at {} ({} absolute ambiguity equations)",
-            _epoch.str_ymdhms(), _ambfix->fixedConstraints().size());
-    return true;
+	if (!_ambfix || !_raw_feedback_problem || !_last_gnss_info)
+		return false;
+
+	map<RawConstraintKey, RawFixedConstraint> pending;
+	map<RawConstraintKey, RawFixedConstraint> candidates;
+	set<RawConstraintKey> obsolete;
+	if (!_translate_RAW_fixed_constraints(
+			_ambfix->fixedConstraints(), pending, candidates, obsolete) ||
+		candidates.empty() || pending.empty() || !obsolete.empty())
+	{
+		if (_spdlog)
+			_spdlog->warn(
+				"PPP RAW PARAMETER candidate translation produced no independent graph equations");
+		return false;
+	}
+
+	double nis = 0.0;
+	int degrees_of_freedom = 0;
+	double chi_square_limit = 0.0;
+	if (!_validate_RAW_candidate_statistics(
+			candidates, *_last_gnss_info, _all_para_win,
+			nis, degrees_of_freedom, chi_square_limit))
+	{
+		if (_spdlog)
+			_spdlog->warn(
+				"PPP RAW PARAMETER candidate rejected by covariance NIS: value={} df={} limit={}",
+				nis, degrees_of_freedom, chi_square_limit);
+		return false;
+	}
+
+	ceres::Problem &problem = *_raw_feedback_problem;
+	vector<double *> parameter_blocks;
+	problem.GetParameterBlocks(&parameter_blocks);
+	map<double *, vector<double>> parameter_snapshot;
+	for (double *address : parameter_blocks)
+	{
+		const int size = problem.ParameterBlockSize(address);
+		parameter_snapshot[address] = vector<double>(address, address + size);
+	}
+	const t_gallpar float_parameters = _all_para_win;
+	const bool previously_constrained = _graph_ambiguity_fixed;
+
+	vector<ceres::ResidualBlockId> original_residuals;
+	problem.GetResidualBlocks(&original_residuals);
+	double float_cost = 0.0;
+	if (!_evaluate_RAW_problem_cost(problem, original_residuals, float_cost))
+		return false;
+
+	vector<ceres::ResidualBlockId> temporary_constraints;
+	for (const auto &entry : pending)
+	{
+		const RawFixedConstraint &constraint = entry.second;
+		double *address_a = _para_AMB_RAW[constraint.amb_a];
+		double *address_b = _para_AMB_RAW[constraint.amb_b];
+		if (!problem.HasParameterBlock(address_a) ||
+			!problem.HasParameterBlock(address_b))
+			break;
+		temporary_constraints.push_back(problem.AddResidualBlock(
+			new FixedAmbiguityFactor(
+				constraint.coefficient_a, constraint.coefficient_b,
+				constraint.target, constraint.sqrt_information),
+			nullptr, address_a, address_b));
+	}
+
+	auto rollback = [&]()
+	{
+		for (ceres::ResidualBlockId residual : temporary_constraints)
+			problem.RemoveResidualBlock(residual);
+		for (const auto &entry : parameter_snapshot)
+			std::copy(entry.second.begin(), entry.second.end(), entry.first);
+		_all_para_win = float_parameters;
+		_graph_ambiguity_fixed = previously_constrained;
+	};
+	if (temporary_constraints.size() != pending.size())
+	{
+		rollback();
+		return false;
+	}
+
+	ceres::Solver::Summary summary;
+	const char *failure_stage = nullptr;
+	if (!_solve_PPP_RAW_problem(problem, summary))
+		failure_stage = "Ceres re-optimization";
+	else if (!feedback_solve_converged(summary))
+		failure_stage = "Ceres convergence gate";
+	else if (!_validate_RAW_constraint_values(candidates))
+		failure_stage = "candidate-equation validation";
+	if (failure_stage)
+	{
+		if (_spdlog)
+			_spdlog->warn(
+				"PPP RAW PARAMETER feedback failed during {}: {}",
+				failure_stage, summary.BriefReport());
+		rollback();
+		return false;
+	}
+	double conditioned_cost = 0.0;
+	if (!_evaluate_RAW_problem_cost(problem, original_residuals, conditioned_cost))
+	{
+		rollback();
+		return false;
+	}
+	const double cost_increase =
+		(std::max)(0.0, 2.0 * (conditioned_cost - float_cost));
+	if (!std::isfinite(cost_increase) || cost_increase > chi_square_limit)
+	{
+		if (_spdlog)
+			_spdlog->warn(
+				"PPP RAW PARAMETER candidate rejected by original-graph cost: delta={} df={} limit={}",
+				cost_increase, degrees_of_freedom, chi_square_limit);
+		rollback();
+		return false;
+	}
+	if (!_rebuild_RAW_posterior_transactional(problem))
+	{
+		rollback();
+		return false;
+	}
+
+	// PARAMETER is a one-epoch conditioning mode: publish the graph-native
+	// conditional state and covariance, but do not retain integer factors in
+	// the next window. CONSTRAINT is the persistent information mode.
+	for (ceres::ResidualBlockId residual : temporary_constraints)
+		problem.RemoveResidualBlock(residual);
+	_double_to_vector();
+	_graph_ambiguity_fixed = true;
+	if (_spdlog)
+		_spdlog->info(
+			"PPP RAW PARAMETER graph conditioning accepted at {}: equations={} NIS={:.3f}/{} delta_cost={:.3f} limit={:.3f}, {}",
+			_epoch.str_ymdhms(), pending.size(), nis, degrees_of_freedom,
+			cost_increase, chi_square_limit, summary.BriefReport());
+	return true;
 }
 
 bool gfgomsf::t_gpvtfgo::_rebuild_RAW_posterior_transactional(
@@ -3491,11 +3740,34 @@ bool gfgomsf::t_gpvtfgo::_rebuild_RAW_posterior_transactional(
 
     _last_gnss_info = nullptr;
     _posteriori_test_PPP_RAW(problem);
-    if (_last_gnss_info && _last_gnss_info->valid)
+    bool posterior_acceptable = _last_gnss_info && _last_gnss_info->valid &&
+		_last_gnss_info->covariance_source ==
+			GNSSCovarianceSource::CERES_FULL_RANK &&
+		_last_gnss_info->v_norm.allFinite();
+	double maximum_normalized_residual = 0.0;
+	if (posterior_acceptable && _last_gnss_info->v_norm.size() > 0)
+		maximum_normalized_residual =
+			_last_gnss_info->v_norm.cwiseAbs().maxCoeff();
+	const double normalized_residual_limit =
+		// Allow only a narrow numerical relinearization margin around the
+		// configured post-fit threshold; this is not a statistical gate change.
+		_max_res_norm > 0.0 ? _max_res_norm * 1.02 : _max_res_norm;
+	posterior_acceptable = posterior_acceptable &&
+		std::isfinite(maximum_normalized_residual) &&
+		maximum_normalized_residual <= normalized_residual_limit + 1e-6;
+    if (posterior_acceptable)
     {
         delete previous_info;
         return true;
     }
+	if (_spdlog)
+		_spdlog->warn(
+			"PPP RAW conditioned posterior rejected: valid={} covariance_source={} max_normalized_residual={:.3f} limit={:.3f}",
+			_last_gnss_info && _last_gnss_info->valid,
+			_last_gnss_info
+				? static_cast<int>(_last_gnss_info->covariance_source)
+				: static_cast<int>(GNSSCovarianceSource::UNAVAILABLE),
+			maximum_normalized_residual, normalized_residual_limit);
 
     delete _last_gnss_info;
     _last_gnss_info = previous_info;
@@ -3522,6 +3794,23 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
 			_spdlog->warn("PPP RAW constraint translation rejected the current fixed candidate");
         return false;
 	}
+	const GNSSInfo *gate_info = _raw_float_search_info
+		? _raw_float_search_info.get() : _last_gnss_info;
+	t_gallpar &gate_parameters = _raw_float_search_info
+		? _raw_float_search_parameters : _all_para_win;
+	double nis = 0.0;
+	int degrees_of_freedom = 0;
+	double chi_square_limit = 0.0;
+	if (!gate_info || !_validate_RAW_candidate_statistics(
+			candidates, *gate_info, gate_parameters,
+			nis, degrees_of_freedom, chi_square_limit))
+	{
+		if (_spdlog)
+			_spdlog->warn(
+				"PPP RAW CONSTRAINT candidate rejected by covariance NIS: value={} df={} limit={}",
+				nis, degrees_of_freedom, chi_square_limit);
+		return false;
+	}
 
     if (pending.empty() && obsolete.empty())
     {
@@ -3542,8 +3831,18 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
     }
     const t_gallpar float_parameters = _all_para_win;
     const bool previously_constrained = _graph_ambiguity_fixed;
-    if (!_write_RAW_fixed_solution(_param_fixed))
-        return false;
+	set<ceres::ResidualBlockId> integer_residuals;
+	for (const auto &entry : _raw_feedback_constraint_residuals)
+		integer_residuals.insert(entry.second);
+	vector<ceres::ResidualBlockId> original_residuals;
+	vector<ceres::ResidualBlockId> all_residuals;
+	problem.GetResidualBlocks(&all_residuals);
+	for (ceres::ResidualBlockId residual : all_residuals)
+		if (integer_residuals.count(residual) == 0)
+			original_residuals.push_back(residual);
+	double float_cost = 0.0;
+	if (!_evaluate_RAW_problem_cost(problem, original_residuals, float_cost))
+		return false;
 
     map<RawConstraintKey, RawFixedConstraint> removed_constraints;
     vector<RawConstraintKey> installed_keys;
@@ -3631,11 +3930,29 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
 	const char *failure_stage = nullptr;
 	if (!_solve_PPP_RAW_problem(problem, summary))
 		failure_stage = "Ceres re-optimization";
+	else if (!feedback_solve_converged(summary))
+		failure_stage = "Ceres convergence gate";
 	else if (!_validate_RAW_constraint_values(expected_constraints))
 		failure_stage = "installed-constraint validation";
 	else if (!_validate_RAW_constraint_values(candidates))
 		failure_stage = "candidate-equation validation";
-	else if (!_rebuild_RAW_posterior_transactional(problem))
+	double conditioned_cost = 0.0;
+	double cost_increase = std::numeric_limits<double>::quiet_NaN();
+	if (!failure_stage)
+	{
+		if (!_evaluate_RAW_problem_cost(
+				problem, original_residuals, conditioned_cost))
+			failure_stage = "original-graph cost evaluation";
+		else
+		{
+			cost_increase =
+				(std::max)(0.0, 2.0 * (conditioned_cost - float_cost));
+			if (!std::isfinite(cost_increase) ||
+				cost_increase > chi_square_limit)
+				failure_stage = "original-graph cost gate";
+		}
+	}
+	if (!failure_stage && !_rebuild_RAW_posterior_transactional(problem))
 		failure_stage = "posterior rebuild";
 	if (failure_stage)
     {
@@ -3654,10 +3971,11 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
     _double_to_vector();
     _graph_ambiguity_fixed = true;
     if (_spdlog)
-        _spdlog->info(
-			"PPP RAW CONSTRAINT feedback accepted at {}: {} equation(s) retired, {} equation(s) installed, {} explicit equation(s), {}",
+		_spdlog->info(
+			"PPP RAW CONSTRAINT feedback accepted at {}: {} equation(s) retired, {} equation(s) installed, {} explicit equation(s), NIS={:.3f}/{} delta_cost={:.3f} limit={:.3f}, {}",
 			_epoch.str_ymdhms(), obsolete.size(), pending.size(),
-			_raw_fixed_constraints.size(),
+			_raw_fixed_constraints.size(), nis, degrees_of_freedom,
+			cost_increase, chi_square_limit,
             summary.BriefReport());
     return true;
 }
@@ -3670,10 +3988,11 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
  * adds state priors/process factors and all code/phase measurement factors, then
  * solves and re-runs outlier rejection until no further observation is dropped.
  *
- * Under AMB_FEEDBACK_MODE::CONSTRAINT the float posterior is snapshotted before
- * the accepted fixed ambiguity equations are (re-)applied and the problem is
- * re-solved; any failure rolls the whole graph back to the last valid float
- * solution (see _apply_RAW_constraint_feedback for the transactional details).
+ * Under either feedback mode the float Ceres problem is retained until the
+ * ambiguity candidate is validated. PARAMETER conditions the current graph
+ * for one epoch and removes the temporary equations; CONSTRAINT retains them
+ * for later optimization and marginalization. Any failed feedback attempt is
+ * rolled back transactionally.
  *
  * @return 1 on success (valid _last_gnss_info), -1 on failure (invalidates it).
  */
@@ -4048,8 +4367,10 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
         iter_flag = _gobs_outlier_detection(outlier) >= 0;
 		_fgo_prof.raw_outlier.add(raw_prof_sw.ms());
         if (!iter_flag && _last_gnss_info && _last_gnss_info->valid &&
-            _ambiguity_feedback_mode == AMB_FEEDBACK_MODE::CONSTRAINT)
+            _ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE)
         {
+			if (_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::CONSTRAINT)
+			{
 			// Integer search must see the observation/prior posterior before
 			// still-explicit fixed factors are re-applied. Otherwise a 1e9
 			// constraint from the preceding epoch can prevent a legitimate new
@@ -4094,17 +4415,25 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
 				};
 
 				ceres::Solver::Summary constrained_summary;
-				if (!_solve_PPP_RAW_problem(problem, constrained_summary))
+				if (!_solve_PPP_RAW_problem(problem, constrained_summary) ||
+					!feedback_solve_converged(constrained_summary))
 				{
+					if (_spdlog)
+						_spdlog->warn(
+							"PPP RAW retained constraint solve rejected: {}",
+							constrained_summary.BriefReport());
 					restore_float_solution();
 					return -1;
 				}
 				_posteriori_test_PPP_RAW(problem);
-				if (!_last_gnss_info || !_last_gnss_info->valid)
+				if (!_last_gnss_info || !_last_gnss_info->valid ||
+					_last_gnss_info->covariance_source !=
+						GNSSCovarianceSource::CERES_FULL_RANK)
 				{
 					restore_float_solution();
 					return -1;
 				}
+			}
 			}
             _raw_feedback_problem_ambiguities = raw_ambiguities;
             _raw_feedback_problem = std::move(problem_owner);

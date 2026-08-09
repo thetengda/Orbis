@@ -169,6 +169,125 @@ namespace great
         return _amb_fixed;
     }
 
+    bool t_gambiguity::beginFeedbackTransaction()
+    {
+        if (_feedback_transaction)
+            return false;
+        _feedback_transaction.reset(new FeedbackTransactionState());
+        FeedbackTransactionState &state = *_feedback_transaction;
+        state.obstype = _obstype;
+        state.crt_time = _crt_time;
+        state.sat_refs = _sat_refs;
+        state.excluded_amb = _excluded_amb;
+        state.DD = _DD;
+        state.DD_save = _DD_save;
+        state.MW = _MW;
+        state.ELE = _ELE;
+        state.SNR = _SNR;
+        state.WL_flag = _WL_flag;
+        state.EWL_flag = _EWL_flag;
+        state.EWL24_flag = _EWL24_flag;
+        state.EWL25_flag = _EWL25_flag;
+        state.IWL = _IWL;
+        state.IEWL = _IEWL;
+        state.IEWL24 = _IEWL24;
+        state.IEWL25 = _IEWL25;
+        state.part_fix = _part_fix;
+        state.ratio = _ratio;
+        state.pdE = _pdE;
+        state.pdC = _pdC;
+        state.pdE_rows = _pdE_rows;
+        state.pdE_columns = _pdE_columns;
+        state.pdE_max_independent = _pdE_max_independent;
+        state.out_ratio = _outRatio;
+        state.is_first = _is_first;
+        state.is_first_nl = _is_first_nl;
+        state.is_first_wl = _is_first_wl;
+        state.is_first_ewl = _is_first_ewl;
+        state.is_first_ewl24 = _is_first_ewl24;
+        state.is_first_ewl25 = _is_first_ewl25;
+        state.amb_fixed = _amb_fixed;
+        state.mDia = _mDia;
+        state.param = _param;
+        state.amb_freqs = _amb_freqs;
+        state.ewl_upd_time = _ewl_Upd_time;
+        state.ewl24_upd_time = _ewl24_Upd_time;
+        state.ewl25_upd_time = _ewl25_Upd_time;
+        state.wl_upd_time = _wl_Upd_time;
+        state.last_fix_time = _last_fix_time;
+        state.fix_epo_num = _fix_epo_num;
+        state.lock_epo_num = _lock_epo_num;
+        state.DD_previous = _DD_previous;
+        state.sats_index = _sats_index;
+        state.total_amb_num = _total_amb_num;
+        state.fixed_amb_num = _fixed_amb_num;
+        state.pending_fixed_constraints = _pending_fixed_constraints;
+        state.fixed_constraints = _fixed_constraints;
+        return true;
+    }
+
+    void t_gambiguity::commitFeedbackTransaction()
+    {
+        _feedback_transaction.reset();
+    }
+
+    bool t_gambiguity::rollbackFeedbackTransaction()
+    {
+        if (!_feedback_transaction)
+            return false;
+        FeedbackTransactionState &state = *_feedback_transaction;
+        _obstype = state.obstype;
+        _crt_time = state.crt_time;
+        _sat_refs = state.sat_refs;
+        _excluded_amb = state.excluded_amb;
+        _DD = state.DD;
+        _DD_save = state.DD_save;
+        _MW = state.MW;
+        _ELE = state.ELE;
+        _SNR = state.SNR;
+        _WL_flag = state.WL_flag;
+        _EWL_flag = state.EWL_flag;
+        _EWL24_flag = state.EWL24_flag;
+        _EWL25_flag = state.EWL25_flag;
+        _IWL = state.IWL;
+        _IEWL = state.IEWL;
+        _IEWL24 = state.IEWL24;
+        _IEWL25 = state.IEWL25;
+        _part_fix = state.part_fix;
+        _ratio = state.ratio;
+        _pdE = state.pdE;
+        _pdC = state.pdC;
+        _pdE_rows = state.pdE_rows;
+        _pdE_columns = state.pdE_columns;
+        _pdE_max_independent = state.pdE_max_independent;
+        _outRatio = state.out_ratio;
+        _is_first = state.is_first;
+        _is_first_nl = state.is_first_nl;
+        _is_first_wl = state.is_first_wl;
+        _is_first_ewl = state.is_first_ewl;
+        _is_first_ewl24 = state.is_first_ewl24;
+        _is_first_ewl25 = state.is_first_ewl25;
+        _amb_fixed = state.amb_fixed;
+        _mDia = state.mDia;
+        _param = state.param;
+        _amb_freqs = state.amb_freqs;
+        _ewl_Upd_time = state.ewl_upd_time;
+        _ewl24_Upd_time = state.ewl24_upd_time;
+        _ewl25_Upd_time = state.ewl25_upd_time;
+        _wl_Upd_time = state.wl_upd_time;
+        _last_fix_time = state.last_fix_time;
+        _fix_epo_num = state.fix_epo_num;
+        _lock_epo_num = state.lock_epo_num;
+        _DD_previous = state.DD_previous;
+        _sats_index = state.sats_index;
+        _total_amb_num = state.total_amb_num;
+        _fixed_amb_num = state.fixed_amb_num;
+        _pending_fixed_constraints = state.pending_fixed_constraints;
+        _fixed_constraints = state.fixed_constraints;
+        _feedback_transaction.reset();
+        return true;
+    }
+
 
     int t_gambiguity::processBatch(const t_gtime &t, t_gflt *gflt, string mode)
     {

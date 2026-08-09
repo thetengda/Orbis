@@ -155,6 +155,8 @@ namespace great
 
         /** @brief ambiguity resolution. */
         virtual int _amb_resolution();
+		/** Emit the current filter state as a Float AR row. */
+		void _output_float_ambiguity_solution();
 
 
         /** @brief is get ref sat. */
