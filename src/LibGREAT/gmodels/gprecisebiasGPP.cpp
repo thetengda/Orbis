@@ -444,7 +444,13 @@ namespace great
         if (obj_clk[name].first != crt_epoch)
         {
             int clk_valid;
-            clk_valid = _gall_nav->clk(name, crt_epoch, &clk, &clk_rms, &dclk);
+			t_gallprec *precise_navigation =
+				_readonly_precise_navigation
+					? dynamic_cast<t_gallprec *>(_gall_nav) : nullptr;
+			clk_valid = precise_navigation
+				? precise_navigation->clk_readonly(
+					name, crt_epoch, &clk, &clk_rms, &dclk)
+				: _gall_nav->clk(name, crt_epoch, &clk, &clk_rms, &dclk);
 
             if (clk_valid < 0)
                 clk = 0.0;

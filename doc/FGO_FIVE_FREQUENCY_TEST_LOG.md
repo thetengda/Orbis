@@ -742,3 +742,34 @@ UPD T4 相对同一最终实现的 T1 加速约 `4.34%`。收益有限但是真�
 UPD T1/T4 共有 60 个历元，Fixed/Float 状态全部一致，3D 坐标差 RMS 约 `0.1 mm`、最大 `0.6 mm`；这是并行 Ceres 浮点归约顺序的末位差异，低于当前定位精度门限。先前 T2/T4 结果逐历元坐标一致。可复核目录：`build/fgo_runs/raw_model_shard_upd_t1_20260811/`、`build/fgo_runs/raw_model_shard_upd_t4_20260811/`、`build/fgo_runs/raw_model_shard_osb_t2_20260811/`，差异报告为 `build/raw_parallel_compare/UPD_SHARD_T1_vs_T4.{md,json}`。
 
 本节只完成 30 分钟快速实现门禁，未恢复用户已停止的全天测试。
+
+## FGO 模糊度条件更新与只读导航优化（2026-08-11）
+
+### 性能定位与实现
+
+- 新增 EWL/EWL24/EWL25/WL/NL 及其内部阶段的 DEBUG 聚合计时。原 30 分钟 UPD/GODN/T2 中，模糊度阶段为 `555.24 ms/历元`；其中 LAMBDA 仅 `0.24 ms/历元`，固定反馈为 `515.06 ms/历元`。根因是每一级都把原始观测和新增虚拟约束整体重新执行一次稠密滤波更新，而输入 `Qx` 已经是 FGO 后验，原始观测实际上被重复条件化。
+- 虚拟固定观测现在按每一级一次性组装，并直接对当前后验执行增量条件更新：`innovation=l-A*dx`，随后更新 `dx/Qx`。完整虚拟观测行仍追加到滤波对象供诊断和事务快照使用，失败路径仍由既有滤波快照回滚。
+- RAW prepared 模型新增只读 SP3/CLK 插值路径。位置插值窗口使用独立的不可变 `t_gephprec` 缓存，只有短暂的缓存映射替换需要互斥；钟差选样和多项式变量均为调用局部状态。普通 FLT、IF/DD 和旧 `pos/clk` 接口保持原路径，RAW 路径失败时也保留旧接口回退。
+- `t_gallprec` 是导出类且新增缓存成员，下游必须完整重编。已重新生成 CMake 工程并重编 `LibGnut`、`LibGREAT`、`GREAT_PVT`；编译为 0 错误。
+
+### 30 分钟性能与数值门禁
+
+同一 UPD/GODN、五频、NONE、60 历元基准结果：
+
+| 版本/线程 | 墙钟 | optimize | ambiguity | RAW solve |
+|---|---:|---:|---:|---:|
+| 优化前 T1 | 64.06 s | 16.80 s | 32.64 s | 190.31 ms/次 |
+| 优化前 T4 | 60.05 s | 12.51 s | 33.28 s | 131.78 ms/次 |
+| 最终 T1 | 26.10 s | 18.28 s | 3.78 s | 209.95 ms/次 |
+| 最终 T4 | 17.88 s | 9.72 s | 4.11 s | 92.30 ms/次 |
+
+最终 T4 相对优化前 T4 总时间减少 `70.2%`，约 `3.36x`；最终 T1 到 T4 总体加速 `1.46x`，RAW solve 加速 `2.27x`。模糊度阶段由约 `555 ms/历元` 降到 `63--69 ms/历元`，固定反馈由约 `515 ms/历元` 降到 `26--30 ms/历元`。Ceres 线性求解仍约 `15 ms/次`，没有被错误归因成主要收益来源。
+
+数值与功能门禁：
+
+- 加锁导航与只读导航的 UPD/GODN 60 个 `.fgo` 历元坐标逐行一致；最终 T1/T4 的 3D 差 RMS `0.1 mm`、P99/最大 `0.6 mm`，状态一致。
+- 当前完整版本并行通过 UPD `PARAMETER/CONSTRAINT` 和 OSB `NONE/PARAMETER/CONSTRAINT` 五组门禁；所有配置退出 0，单站均为 60/60 连续有限历元，双站均为 120/120。
+- 共享滤波更新另以 UPD/OSB FLT 双站验证，四个 `.flt` 文件均为 60/60 历元，进程退出 0；测试后所有 XML 已恢复全天范围或默认 INFO/T2 设置。
+- 同一 FLT 门禁的自动分析显示：GODN 的 UPD/OSB 永久收敛分别为 2.0/0.5 min，永久收敛后 3D RMS 分别为 0.0114/0.0224 m；HARB 分别为 8.0/13.0 min，永久收敛后 3D RMS 分别为 0.0215/0.0163 m。HARB 早期仍存在短暂超限段，因此 30 分钟结果只作为快速回归门禁，不能替代全天稳定性结论。
+
+可复核性能目录：`build/fgo_runs/fgo_final_perf_t1_20260811/`、`build/fgo_runs/fgo_final_perf_t4_20260811/`、`build/fgo_runs/fgo_nav_readonly_t2_rebuilt_20260811/`。最终反馈矩阵为 `build/fgo_runs/fgo_final_perf_matrix_20260811/`，FLT 门禁为 `build/fgo_runs/flt_incremental_gate_20260811/`。本节仍只做 30 分钟快速门禁，未启动全天测试。

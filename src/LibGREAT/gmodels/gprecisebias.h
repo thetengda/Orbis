@@ -30,6 +30,11 @@ namespace great
     class LibGREAT_LIBRARY_EXPORT t_gprecisebias : public t_gbiasmodel
     {
     public:
+		/** Use immutable precise-product interpolation during parallel preparation. */
+		void use_readonly_precise_navigation(bool enabled) noexcept
+		{
+			_readonly_precise_navigation = enabled;
+		}
         t_gprecisebias(t_gallproc *data, t_gsetbase *setting);
         t_gprecisebias(t_gallproc *data, t_spdlog spdlog, t_gsetbase *setting);
         ~t_gprecisebias();
@@ -248,6 +253,7 @@ namespace great
         t_gpoleut1 *_gdata_erp = nullptr; ///< all poleut1 data
         t_gnavde *_gdata_navde = nullptr; ///< all panetnav info
         t_gallnav *_gall_nav = nullptr;   ///< all nav data include rinexn,sp3,clk
+		bool _readonly_precise_navigation = false;
         t_gallobj *_gallobj = nullptr;    ///< all obj
         t_gallopl *_opl = nullptr;        ///< opl
         modeofmeanpole _mean_pole_model = modeofmeanpole::cubic;

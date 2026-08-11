@@ -2592,21 +2592,22 @@ namespace great
             virtual_equ.add_equ(B, p0, dl, _site, get<0>(itdd->ddSats[0]) + "_" + get<0>(itdd->ddSats[1]), type, false);
 			++virtual_observation_count;
         }
-		if (virtual_observation_count > 0)
-		{
-			Matrix B_mat;
-			SymmetricMatrix P_mat;
-			ColumnVector l_mat;
-			virtual_equ.chageNewMat(B_mat, P_mat, l_mat, gflt->npar_number());
-			gflt->resetQ();
-			gflt->add_virtual_obs(B_mat, P_mat, l_mat);
-		}
-
         try
         {
-            gflt->update();
+			if (virtual_observation_count > 0)
+			{
+				Matrix B_mat;
+				SymmetricMatrix P_mat;
+				ColumnVector l_mat;
+				virtual_equ.chageNewMat(B_mat, P_mat, l_mat, gflt->npar_number());
+				gflt->update_virtual_obs(B_mat, P_mat, l_mat);
+			}
+			else
+			{
+				gflt->update();
+			}
         }
-        catch (exception e)
+        catch (const exception &e)
         {
             if (_spdlog)
                 SPDLOG_LOGGER_DEBUG(_spdlog, e.what(), "Ambiguity Constrain Failed!");
@@ -2796,18 +2797,20 @@ namespace great
             virtual_equ.add_equ(B, p0, dl, _site, get<0>(itdd->ddSats[0]) + "_" + get<0>(itdd->ddSats[2]) + "_" + get<0>(itdd->ddSats[1]) + "_" + get<0>(itdd->ddSats[3]), type, false);
 			++virtual_observation_count;
         }
-		if (virtual_observation_count > 0)
-		{
-			Matrix B_mat;
-			SymmetricMatrix P_mat;
-			ColumnVector l_mat;
-			virtual_equ.chageNewMat(B_mat, P_mat, l_mat, gflt->npar_number());
-			gflt->resetQ();
-			gflt->add_virtual_obs(B_mat, P_mat, l_mat);
-		}
         try
         {
-            gflt->update();
+			if (virtual_observation_count > 0)
+			{
+				Matrix B_mat;
+				SymmetricMatrix P_mat;
+				ColumnVector l_mat;
+				virtual_equ.chageNewMat(B_mat, P_mat, l_mat, gflt->npar_number());
+				gflt->update_virtual_obs(B_mat, P_mat, l_mat);
+			}
+			else
+			{
+				gflt->update();
+			}
         }
         catch (const exception &e)
         {

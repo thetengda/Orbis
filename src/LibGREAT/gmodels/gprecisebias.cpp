@@ -1029,7 +1029,13 @@ namespace great
         if (nav)
         {
             double xyz_sat[3];
-            pos_valid = (nav->pos(sat, sat_epoch, xyz_sat) >= 0) ? true : false;
+			t_gallprec *precise_navigation =
+				_readonly_precise_navigation
+					? dynamic_cast<t_gallprec *>(nav) : nullptr;
+			const int position_status = precise_navigation
+				? precise_navigation->pos_readonly(sat, sat_epoch, xyz_sat)
+				: nav->pos(sat, sat_epoch, xyz_sat);
+            pos_valid = position_status >= 0;
 
             // TRS2CRS
             _update_rot_matrix(sat_epoch);

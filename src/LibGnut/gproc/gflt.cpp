@@ -12,6 +12,7 @@
 #include <cmath>
 #include <iostream>
 #include <chrono>
+#include <stdexcept>
 
 #include "gproc/gflt.h"
 #include "gutils/gmatrixconv.h"
@@ -86,6 +87,33 @@ namespace gnut
         _P_virtual.SubMatrix(virtual_total_obs_num + 1, virtual_total_obs_num + virtual_obs_num, virtual_total_obs_num + 1, virtual_total_obs_num + virtual_obs_num) = P;
         _l_virtual.SubMatrix(virtual_total_obs_num + 1, virtual_total_obs_num + virtual_obs_num, 1, 1) = l;
     }
+
+	void t_gflt::update_virtual_obs(const Matrix &A, const SymmetricMatrix &P,
+		const ColumnVector &l)
+	{
+		const int observation_count = A.Nrows();
+		if (observation_count <= 0 || A.Ncols() != _Qx.Nrows() ||
+			P.Nrows() != observation_count || l.Nrows() != observation_count ||
+			_dx.Nrows() != _Qx.Nrows())
+			throw std::invalid_argument("invalid virtual-observation dimensions");
+
+		// _Qx/_dx already represent the float posterior. Sequentially condition
+		// that posterior instead of solving all original observations again.
+		const ColumnVector innovation = l - A * _dx;
+		const SymmetricMatrix measurement_covariance = P.i();
+		const Matrix innovation_covariance =
+			measurement_covariance + A * _Qx * A.t();
+		const Matrix gain = _Qx * A.t() * innovation_covariance.i();
+		const IdentityMatrix identity(_Qx.Nrows());
+		const Matrix residual_mapping = identity - gain * A;
+		_dx += gain * innovation;
+		_Qx << residual_mapping * _Qx * residual_mapping.t() +
+			gain * measurement_covariance * gain.t();
+
+		// Retain the rows for diagnostics and for callers that inspect the full
+		// conditional equation after ambiguity resolution.
+		add_virtual_obs(A, P, l);
+	}
 
     void t_gflt::change_Qx(int row, int col, double xx)
     {

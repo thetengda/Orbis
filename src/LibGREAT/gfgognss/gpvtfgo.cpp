@@ -3165,8 +3165,12 @@ bool gfgomsf::t_gpvtfgo::_solve_PPP_RAW_problem(
 			const size_t execution_threads = (std::min)(
 				preparation_shards, static_cast<size_t>(requested_threads));
 			while (_raw_prepare_models.size() < preparation_shards)
-				_raw_prepare_models.emplace_back(new t_gprecisebiasFGO(
+			{
+				unique_ptr<t_gprecisebiasFGO> model(new t_gprecisebiasFGO(
 					_allproc, _spdlog, _set));
+				model->use_readonly_precise_navigation(true);
+				_raw_prepare_models.emplace_back(std::move(model));
+			}
 
 			struct RawPreparationTask
 			{

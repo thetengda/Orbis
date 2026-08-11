@@ -23,6 +23,7 @@ History
 #include "gdata/gephprec.h"
 #include "gutils/gtriple.h"
 #include "gmodels/gpoly.h"
+#include <mutex>
 
 using namespace std;
 
@@ -91,6 +92,11 @@ namespace gnut
          */
         int pos(const string &sat, const t_gtime &t, double xyz[3], double var[3] = NULL, double vel[3] = NULL, const bool &chk_mask = true); 
 
+		/** Read-only precise-orbit interpolation for parallel factor preparation. */
+		int pos_readonly(const string &sat, const t_gtime &t, double xyz[3],
+			double var[3] = NULL, double vel[3] = NULL,
+			const bool &chk_mask = true);
+
         /**
          * @brief  GNAV quality
          * 
@@ -116,6 +122,11 @@ namespace gnut
          * @return int 
          */
         int clk(const string &sat, const t_gtime &t, double *clk, double *var = NULL, double *dclk = NULL, const bool &chk_mask = true) override; 
+
+		/** Read-only precise-clock interpolation for parallel factor preparation. */
+		int clk_readonly(const string &sat, const t_gtime &t, double *clk,
+			double *var = NULL, double *dclk = NULL,
+			const bool &chk_mask = true);
 
         /**
          * @brief clk_int
@@ -294,6 +305,14 @@ namespace gnut
         t_map_prn _mapclk;  // precise clocks (CLOCK-RINEX) - full discrete data sets
 
     private:
+		shared_ptr<t_gephprec> _find_readonly(const string &sat,
+			const t_gtime &t);
+		shared_ptr<t_gephprec> _build_readonly_ephemeris(
+			const string &sat, const t_gtime &t);
+		// The read-only cache stores immutable interpolation windows. Only the
+		// short map lookup/replacement is serialized; polynomial evaluation is not.
+		std::mutex _readonly_prec_mutex;
+		t_map_sp3 _readonly_prec;
         t_map_sp3 _prec;          ///< CACHE: single SP3 precise ephemeris for all satellites
         unsigned int _degree_sp3; ///< polynom degree for satellite sp3 position and clocks
         double _sec;              ///< default polynomial units

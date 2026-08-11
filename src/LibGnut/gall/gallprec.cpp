@@ -101,6 +101,25 @@ namespace gnut
         return irc;
     }
 
+	int t_gallprec::pos_readonly(const string &sat, const t_gtime &t,
+		double xyz[3], double var[3], double vel[3], const bool &chk_mask)
+	{
+		shared_ptr<t_gephprec> precise = _find_readonly(sat, t);
+		if (!precise)
+		{
+			for (int component = 0; component < 3; ++component)
+			{
+				xyz[component] = 0.0;
+				if (var) var[component] = 0.0;
+				if (vel) vel[component] = 0.0;
+			}
+			return _posnav
+				? t_gallnav::pos(sat, t, xyz, var, vel, chk_mask)
+				: -1;
+		}
+		return precise->pos(t, xyz, var, vel, _chkHealth && chk_mask);
+	}
+
     int t_gallprec::clk(const string &sat, const t_gtime &t, double *clk, double *var, double *dclk, const bool &chk_mask)
     {
         _gmutex.lock();
@@ -133,6 +152,122 @@ namespace gnut
         _gmutex.unlock();
         return 1;
     }
+
+	int t_gallprec::clk_readonly(const string &sat, const t_gtime &t,
+		double *clk, double *var, double *dclk, const bool &chk_mask)
+	{
+		if (!clk)
+			return -1;
+		const auto satellite = _mapclk.find(sat);
+		if (!_clkrnx || satellite == _mapclk.end() || satellite->second.empty())
+			return this->clk(sat, t, clk, var, dclk, chk_mask);
+
+		const t_map_epo &samples = satellite->second;
+		auto begin = samples.begin();
+		auto end = samples.end();
+		auto last = end;
+		--last;
+		auto requested = end;
+		if (t < begin->first)
+		{
+			if (begin->first.diff(t) > MAX_PRECISE_EXTRAPOLATION)
+				return this->clk(sat, t, clk, var, dclk, chk_mask);
+			requested = begin;
+		}
+		else if (t > last->first)
+		{
+			if (t.diff(last->first) > MAX_PRECISE_EXTRAPOLATION)
+				return this->clk(sat, t, clk, var, dclk, chk_mask);
+			requested = last;
+		}
+		else
+		{
+			requested = samples.lower_bound(t);
+		}
+
+		const t_gtime clock_reference = requested->first;
+		const unsigned int degree = 1;
+		const int left_limit = static_cast<int>(degree / 2);
+		if (samples.size() < degree + 1)
+			return this->clk(sat, t, clk, var, dclk, chk_mask);
+		auto sample = requested;
+		if (distance(begin, requested) <= left_limit)
+			sample = begin;
+		else if (distance(requested, end) <=
+			static_cast<int>(degree - left_limit))
+		{
+			sample = end;
+			for (unsigned int i = 0; i <= degree; ++i) --sample;
+		}
+		else
+		{
+			for (int i = 0; i <= left_limit; ++i) --sample;
+		}
+
+		auto value = [](const t_map_dat &record, const char *key,
+			double fallback)
+		{
+			const auto found = record.find(key);
+			return found == record.end() ? fallback : found->second;
+		};
+		vector<double> times;
+		vector<double> clocks;
+		// IFCB clock records use a legacy one-step selection rule; preserve it
+		// through the locked path until that product is covered by a pure model.
+		if (sample->second.find("IFCB_F3") != sample->second.end())
+			return this->clk(sat, t, clk, var, dclk, chk_mask);
+		const double c1 = value(sample->second, "C1", UNDEFVAL_CLK);
+		const double c2 = value(sample->second, "C2", UNDEFVAL_CLK);
+		if (c1 < UNDEFVAL_CLK)
+		{
+			const double time_difference = sample->first - t;
+			const double c0 = value(sample->second, "C0", UNDEFVAL_CLK);
+			times.push_back(time_difference);
+			clocks.push_back(c0 + c1 * time_difference +
+				(c2 < UNDEFVAL_CLK ? c2 * time_difference * time_difference : 0.0));
+		}
+		else
+		{
+			for (unsigned int i = 0; i <= degree && sample != end; ++i, ++sample)
+			{
+				const double time_difference = sample->first - clock_reference;
+				if (fabs(time_difference) > static_cast<double>(degree * MAXDIFF_CLK))
+					continue;
+				const double c0 = value(sample->second, "C0", UNDEFVAL_CLK);
+				if (c0 != UNDEFVAL_CLK)
+				{
+					times.push_back(time_difference);
+					clocks.push_back(c0);
+				}
+			}
+			if (clocks.size() != degree + 1 && requested != begin)
+			{
+				times.clear();
+				clocks.clear();
+				auto previous = requested;
+				--previous;
+				if (fabs(previous->first - clock_reference) >
+					static_cast<double>(degree * MAXDIFF_CLK))
+					return this->clk(sat, t, clk, var, dclk, chk_mask);
+				clocks.push_back(value(previous->second, "C0", UNDEFVAL_CLK));
+				times.push_back(previous->first - clock_reference);
+				clocks.push_back(value(requested->second, "C0", UNDEFVAL_CLK));
+				times.push_back(0.0);
+			}
+		}
+
+		if (times.empty() || clocks.empty())
+			return this->clk(sat, t, clk, var, dclk, chk_mask);
+		double local_drift = 0.0;
+		t_gpoly polynomial;
+		polynomial.interpolate(times, clocks, t.diff(clock_reference),
+			*clk, local_drift);
+		if (times.size() > 1 && !double_eq(times.back(), times.front()))
+			local_drift /= times.back() - times.front();
+		if (dclk) *dclk = local_drift;
+		if (var) *var = 0.0;
+		return 1;
+	}
 
     int t_gallprec::clk_int(const string &sat, const t_gtime &t, double *clk, double *var, double *dclk)
     {
@@ -595,6 +730,129 @@ namespace gnut
 
         return it->second;
     }
+
+	shared_ptr<t_gephprec> t_gallprec::_find_readonly(
+		const string &sat, const t_gtime &t)
+	{
+		const auto satellite = _mapsp3.find(sat);
+		if (satellite == _mapsp3.end() || satellite->second.empty())
+			return shared_ptr<t_gephprec>();
+
+		shared_ptr<t_gephprec> cached;
+		{
+			lock_guard<mutex> lock(_readonly_prec_mutex);
+			const auto found = _readonly_prec.find(sat);
+			if (found != _readonly_prec.end()) cached = found->second;
+		}
+		if (cached)
+		{
+			const double from_reference = t - cached->epoch();
+			if (fabs(static_cast<float>(from_reference)) <
+				cached->interval() / _degree_sp3 && cached->valid(t))
+				return cached;
+			const t_gtime first(satellite->second.begin()->first);
+			const t_gtime last(satellite->second.rbegin()->first);
+			const bool refresh =
+				(fabs(t.diff(first)) > cached->interval() / 2 &&
+				 fabs(t.diff(last)) > cached->interval() / 2) ||
+				!cached->valid(t);
+			if (!refresh)
+				return cached;
+		}
+
+		shared_ptr<t_gephprec> prepared = _build_readonly_ephemeris(sat, t);
+		if (prepared)
+		{
+			lock_guard<mutex> lock(_readonly_prec_mutex);
+			_readonly_prec[sat] = prepared;
+		}
+		return prepared;
+	}
+
+	shared_ptr<t_gephprec> t_gallprec::_build_readonly_ephemeris(
+		const string &sat, const t_gtime &t)
+	{
+		const auto satellite = _mapsp3.find(sat);
+		if (satellite == _mapsp3.end() || satellite->second.empty())
+			return shared_ptr<t_gephprec>();
+		const t_map_epo &samples = satellite->second;
+		auto begin = samples.begin();
+		auto end = samples.end();
+		auto last = end;
+		--last;
+		t_gtime query(t);
+		if (t < begin->first)
+		{
+			if (begin->first.diff(t) > MAX_PRECISE_EXTRAPOLATION)
+				return shared_ptr<t_gephprec>();
+			query = begin->first;
+		}
+		else if (t > last->first)
+		{
+			if (t.diff(last->first) > MAX_PRECISE_EXTRAPOLATION)
+				return shared_ptr<t_gephprec>();
+			query = last->first;
+		}
+		auto requested = samples.lower_bound(query);
+		if (requested == end) requested = last;
+		if (requested != begin)
+		{
+			auto previous = requested;
+			--previous;
+			if (abs(t.diff(previous->first)) < abs(t.diff(requested->first)))
+				requested = previous;
+		}
+
+		const t_gtime reference = requested->first;
+		const int left_limit = static_cast<int>(_degree_sp3 / 2);
+		if (distance(begin, end) < static_cast<int>(_degree_sp3))
+			return shared_ptr<t_gephprec>();
+		auto sample = requested;
+		if (distance(begin, requested) < left_limit)
+			sample = begin;
+		else if (distance(requested, end) <=
+			static_cast<int>(_degree_sp3 - left_limit))
+		{
+			sample = end;
+			for (unsigned int i = 0; i <= _degree_sp3; ++i) --sample;
+		}
+		else
+		{
+			for (int i = 0; i < left_limit; ++i) --sample;
+		}
+
+		vector<t_gtime> epochs;
+		vector<double> x, y, z, clocks;
+		auto value = [](const t_map_dat &record, const char *key,
+			double fallback)
+		{
+			const auto found = record.find(key);
+			return found == record.end() ? fallback : found->second;
+		};
+		for (unsigned int i = 0; i <= _degree_sp3 && sample != end;
+			 ++i, ++sample)
+		{
+			const double time_difference = sample->first - reference;
+			if (fabs(time_difference) >
+				static_cast<double>(_degree_sp3 * MAXDIFF_EPH))
+				continue;
+			const double sample_x = value(sample->second, "X", UNDEFVAL_POS);
+			if (sample_x == UNDEFVAL_POS)
+				continue;
+			epochs.push_back(sample->first);
+			x.push_back(sample_x);
+			y.push_back(value(sample->second, "Y", UNDEFVAL_POS));
+			z.push_back(value(sample->second, "Z", UNDEFVAL_POS));
+			clocks.push_back(value(sample->second, "C", 0.0));
+		}
+		if (x.size() != _degree_sp3 + 1)
+			return shared_ptr<t_gephprec>();
+		shared_ptr<t_gephprec> precise(new t_gephprec(_spdlog));
+		precise->spdlog(_spdlog);
+		precise->degree(_degree_sp3);
+		precise->add(sat, epochs, x, y, z, clocks);
+		return precise;
+	}
 
     int t_gallprec::_get_crddata(const string &sat, const t_gtime &t)
     {

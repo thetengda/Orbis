@@ -107,6 +107,10 @@ namespace gnut
         */
         virtual void add_virtual_obs(const Matrix &A, const SymmetricMatrix &P, const ColumnVector &l);
 
+		/** Condition the current posterior on a batch of virtual observations. */
+		void update_virtual_obs(const Matrix &A, const SymmetricMatrix &P,
+			const ColumnVector &l);
+
         /**
         * @brief detect outlier.
         *
