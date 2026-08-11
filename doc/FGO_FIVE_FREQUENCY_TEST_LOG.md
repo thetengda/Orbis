@@ -773,3 +773,18 @@ UPD T1/T4 共有 60 个历元，Fixed/Float 状态全部一致，3D 坐标差 RM
 - 同一 FLT 门禁的自动分析显示：GODN 的 UPD/OSB 永久收敛分别为 2.0/0.5 min，永久收敛后 3D RMS 分别为 0.0114/0.0224 m；HARB 分别为 8.0/13.0 min，永久收敛后 3D RMS 分别为 0.0215/0.0163 m。HARB 早期仍存在短暂超限段，因此 30 分钟结果只作为快速回归门禁，不能替代全天稳定性结论。
 
 可复核性能目录：`build/fgo_runs/fgo_final_perf_t1_20260811/`、`build/fgo_runs/fgo_final_perf_t4_20260811/`、`build/fgo_runs/fgo_nav_readonly_t2_rebuilt_20260811/`。最终反馈矩阵为 `build/fgo_runs/fgo_final_perf_matrix_20260811/`，FLT 门禁为 `build/fgo_runs/flt_incremental_gate_20260811/`。本节仍只做 30 分钟快速门禁，未启动全天测试。
+
+## 测试脚本质量门禁与运行诊断（2026-08-11）
+
+### 新增指标和门禁
+
+- `analyze_fgo_solution.py` 现在额外输出 Fixed/Float 状态分布、未知状态数、基线匹配历元/匹配率、逐小时统计和可选质量门禁。门禁可限制完整时间网格、首次持续/永久收敛时间、Fixed/正确 Fixed 比例、收敛后 3D 最大误差、坐标跳变、状态切换和基线差值。
+- `run_fgo_experiments.py` 现在采集墙钟、程序 `Spent`、站点历元吞吐、实时倍数、峰值 RSS，并解析 DEBUG FGO 阶段计时、RAW 图规模、Ceres 迭代数、反馈/异常/协方差回退事件。性能门禁可限制墙钟、实时倍数、峰值 RSS、RAW/Ceres 阶段耗时、反馈拒绝和伪逆次数。
+- 所有门禁均为显式配置；没有配置时仅报告，不改变原有通过/失败语义。启用 `fail_on_gate` 后，质量门禁失败返回非零；`performance_gates` 存在时执行性能门禁。
+
+### 边界回归和实际启动器回归
+
+- 修正分析器首历元边界：`00:00:00` 属于名义时间网格，首历元延迟按相对配置起点计算，不再误报为超出范围。
+- UPD/FGO/F5/NONE/GODN 30 分钟启动器回归：退出码 0，输出 `60/60`，首末 SOW 正确、完整网格 `yes`、无畸形/非有限行；墙钟 `34.057 s`，程序 `Spent=22.128 s`，峰值 RSS `825.629 MB`，吞吐 `1.762 station epochs/s`，实时倍数 `52.852`。结果目录为 `build/fgo_runs/script_runner_20260811_b/`。
+- 对已有 DEBUG 日志的解析回归成功识别 1 个 FGO profile、60 个窗口、RAW solve 平均 `92.30 ms`、线性求解平均 `15.30 ms`、平均 `1.22` 次图尝试、`193.48` 个参数标量、`701.75` 个残差标量和 `16.89` 次 Ceres 迭代。
+- 质量门禁负向测试按预期返回非零并保留具体原因；脚本 `py_compile` 和默认无门禁分析均通过。全天测试仍未启动。

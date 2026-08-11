@@ -125,6 +125,8 @@ class ProcessEntry:
     started_iso: str
     output_before: Dict[str, Optional[Tuple[int, int]]]
     timed_out: bool = False
+    peak_rss_bytes: int = 0
+    last_rss_bytes: int = 0
 
 
 def resolve_path(value: str | Path, base: Path = REPO_ROOT) -> Path:
@@ -423,6 +425,77 @@ def solution_progress(path: Path) -> Dict[str, object]:
     }
 
 
+def process_resource_snapshot(pid: int) -> Dict[str, int]:
+    """Return portable best-effort RSS counters without a third-party package."""
+    if pid <= 0:
+        return {}
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class Counters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            handle = kernel32.OpenProcess(0x1000 | 0x0400, False, pid)
+            if not handle:
+                return {}
+            counters = Counters()
+            counters.cb = ctypes.sizeof(Counters)
+            try:
+                if not psapi.GetProcessMemoryInfo(
+                    handle, ctypes.byref(counters), counters.cb
+                ):
+                    return {}
+                return {
+                    "rss_bytes": int(counters.WorkingSetSize),
+                    "peak_rss_bytes": int(counters.PeakWorkingSetSize),
+                }
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, ValueError):
+            return {}
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        values = {}
+        for line in status_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:") or line.startswith("VmHWM:"):
+                fields = line.split()
+                if len(fields) >= 2:
+                    values[line.split(":", 1)[0]] = int(fields[1]) * 1024
+        return {
+            "rss_bytes": values.get("VmRSS", 0),
+            "peak_rss_bytes": values.get("VmHWM", values.get("VmRSS", 0)),
+        }
+    except (OSError, ValueError):
+        return {}
+
+
+def sample_process_resources(entry: ProcessEntry) -> None:
+    sample = process_resource_snapshot(entry.process.pid)
+    if not sample:
+        return
+    entry.last_rss_bytes = sample.get("rss_bytes", 0)
+    entry.peak_rss_bytes = max(
+        entry.peak_rss_bytes,
+        sample.get("peak_rss_bytes", 0),
+        sample.get("rss_bytes", 0),
+    )
+
+
 def entry_output_progress(entry: ProcessEntry, output: OutputSpec) -> Dict[str, object]:
     """Hide a pre-existing result until this process has changed the file."""
     if file_signature(output.fgo) == entry.output_before.get(str(output.fgo)):
@@ -504,6 +577,129 @@ def scan_patterns(paths: Iterable[Path], patterns: Sequence[re.Pattern]) -> List
         except OSError:
             continue
     return matches
+
+
+def parse_runtime_diagnostics(paths: Iterable[Path]) -> Dict[str, object]:
+    """Extract optional GREAT/FGO timing summaries from fresh process logs."""
+    spent: List[float] = []
+    profiles: List[Dict[str, object]] = []
+    event_counts = {
+        "feedback_accepted": 0,
+        "feedback_rejected": 0,
+        "outlier": 0,
+        "cycle_slip": 0,
+        "raw_prepare_failed": 0,
+        "covariance_fallback": 0,
+        "rank_deficient": 0,
+        "pseudo_inverse": 0,
+    }
+    feedback_events: List[Dict[str, object]] = []
+    phase_pattern = re.compile(
+        r"^\s*(?P<phase>[A-Za-z][A-Za-z0-9_. ]*?)\s*\|\s*"
+        r"(?P<count>\d+)\s*\|\s*(?P<avg>[-+0-9.eE]+)\s*\|\s*"
+        r"(?P<min>[-+0-9.eE]+)\s*\|\s*(?P<max>[-+0-9.eE]+)\s*\|\s*"
+        r"(?P<total>[-+0-9.eE]+)\s*$"
+    )
+    profile_header = re.compile(r"\[FGO\] per-window phase timing over (\d+) processed window")
+    spent_pattern = re.compile(r"Spent\s*([0-9]+(?:\.[0-9]+)?)\s*seconds", re.IGNORECASE)
+    raw_average = re.compile(
+        r"RAW graph averages:\s*([0-9.eE+-]+)\s+build/solve attempt\(s\) per window,\s*"
+        r"([0-9.eE+-]+)\s+parameter scalar\(s\),\s*"
+        r"([0-9.eE+-]+)\s+residual scalar\(s\),\s*"
+        r"([0-9.eE+-]+)\s+Ceres iteration\(s\) per solve"
+    )
+    event_patterns = {
+        "feedback_accepted": re.compile(r"feedback\s+accepted", re.IGNORECASE),
+        "feedback_rejected": re.compile(r"feedback\s+rejected|rejected\s+fixed\s+candidate", re.IGNORECASE),
+        "outlier": re.compile(r"outlier", re.IGNORECASE),
+        "cycle_slip": re.compile(r"cycle\s*slip|slip\s+detect", re.IGNORECASE),
+        "raw_prepare_failed": re.compile(r"raw[^\r\n]*prepar[^\r\n]*failed", re.IGNORECASE),
+        "covariance_fallback": re.compile(r"covariance[^\r\n]*(?:fallback|regulariz|ridge)", re.IGNORECASE),
+        "rank_deficient": re.compile(r"rank\s*(?:deficient|=\s*N-\d+)", re.IGNORECASE),
+        "pseudo_inverse": re.compile(r"pseudo(?:inverse|-inverse)", re.IGNORECASE),
+    }
+    feedback_pattern = re.compile(
+        r"feedback\s+(?P<status>accepted|rejected)[^\r\n]*?"
+        r"(?:selected_candidates=(?P<selected>\d+)/(?:\s*)?(?P<total>\d+))?[^\r\n]*?"
+        r"(?:NIS=(?P<nis>[-+0-9.eE]+)/(?P<nis_limit>[-+0-9.eE]+))?[^\r\n]*?"
+        r"(?:delta_cost=(?P<delta>[-+0-9.eE]+)\s+limit=(?P<delta_limit>[-+0-9.eE]+))?",
+        re.IGNORECASE,
+    )
+    seen_paths = set()
+    for path in paths:
+        if path in seen_paths or not path.is_file():
+            continue
+        seen_paths.add(path)
+        current: Optional[Dict[str, object]] = None
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            for name, pattern in event_patterns.items():
+                if pattern.search(line):
+                    event_counts[name] += 1
+            feedback_match = feedback_pattern.search(line)
+            if feedback_match:
+                event: Dict[str, object] = {"status": feedback_match.group("status").upper()}
+                for field, group in (
+                    ("selected_candidates", "selected"),
+                    ("candidate_total", "total"),
+                    ("nis", "nis"),
+                    ("nis_limit", "nis_limit"),
+                    ("delta_cost", "delta"),
+                    ("delta_cost_limit", "delta_limit"),
+                ):
+                    value = feedback_match.group(group)
+                    if value is not None:
+                        event[field] = int(value) if field in ("selected_candidates", "candidate_total") else float(value)
+                feedback_events.append(event)
+            spent_match = spent_pattern.search(line)
+            if spent_match:
+                spent.append(float(spent_match.group(1)))
+            header_match = profile_header.search(line)
+            if header_match:
+                if current is not None:
+                    profiles.append(current)
+                current = {
+                    "windows": int(header_match.group(1)),
+                    "phases": {},
+                }
+                continue
+            if current is None:
+                continue
+            phase_match = phase_pattern.match(line)
+            if phase_match:
+                phase = phase_match.group("phase").strip()
+                current["phases"][phase] = {
+                    "count": int(phase_match.group("count")),
+                    "avg_ms": float(phase_match.group("avg")),
+                    "min_ms": float(phase_match.group("min")),
+                    "max_ms": float(phase_match.group("max")),
+                    "total_ms": float(phase_match.group("total")),
+                }
+                continue
+            raw_match = raw_average.search(line)
+            if raw_match:
+                current["raw_graph_averages"] = {
+                    "attempts_per_window": float(raw_match.group(1)),
+                    "parameters": float(raw_match.group(2)),
+                    "residuals": float(raw_match.group(3)),
+                    "ceres_iterations_per_solve": float(raw_match.group(4)),
+                }
+        if current is not None:
+            profiles.append(current)
+    result: Dict[str, object] = {
+        "spent_seconds": spent[-1] if spent else None,
+        "spent_samples": spent,
+        "fgo_profile_count": len(profiles),
+        "fgo_profiles": profiles,
+        "event_counts": event_counts,
+        "feedback_events": feedback_events,
+    }
+    if len(profiles) == 1:
+        result["fgo_profile"] = profiles[0]
+    return result
 
 
 def atomic_json(path: Path, value: object) -> None:
@@ -610,6 +806,7 @@ def build_initial_state(run_id: str, run_dir: Path, experiments: Sequence[Experi
 def update_progress(state: dict, active: Mapping[int, ProcessEntry]) -> None:
     now = time.monotonic()
     for entry in active.values():
+        sample_process_resources(entry)
         progress = {}
         for output in entry.experiment.outputs:
             snapshot = entry_output_progress(entry, output)
@@ -694,6 +891,7 @@ def finish_experiment(
     state: dict,
     compiled_patterns: Sequence[re.Pattern],
 ) -> Dict[str, object]:
+    sample_process_resources(entry)
     entry.process.wait()
     entry.stdout_stream.close()
     entry.stderr_stream.close()
@@ -735,6 +933,25 @@ def finish_experiment(
         "processed_data_seconds": data_seconds,
         "realtime_factor": data_seconds / elapsed if elapsed > 0 else None,
         "solver_threads": entry.experiment.solver_threads,
+        "peak_rss_mb": (
+            entry.peak_rss_bytes / (1024.0 * 1024.0)
+            if entry.peak_rss_bytes else None
+        ),
+        "last_rss_mb": (
+            entry.last_rss_bytes / (1024.0 * 1024.0)
+            if entry.last_rss_bytes else None
+        ),
+        "runtime_diagnostics": parse_runtime_diagnostics(
+            [
+                entry.stdout_path,
+                entry.stderr_path,
+                *(
+                    path
+                    for path in entry.experiment.diagnostic_logs
+                    if file_signature(path) != entry.output_before.get(str(path))
+                ),
+            ]
+        ),
     }
     status = "PASSED" if not errors else "FAILED"
     result = {
@@ -757,6 +974,125 @@ def finish_experiment(
     for error in errors:
         print(f"       - {error}", flush=True)
     return result
+
+
+def performance_gate_config(manifest: Mapping[str, object]) -> Dict[str, object]:
+    configured = manifest.get("performance_gates")
+    if isinstance(configured, Mapping):
+        return dict(configured)
+    gates = manifest.get("gates")
+    if isinstance(gates, Mapping) and isinstance(gates.get("performance"), Mapping):
+        return dict(gates["performance"])
+    return {}
+
+
+def apply_performance_gates(state: dict, manifest: Mapping[str, object]) -> bool:
+    """Apply optional runtime gates after all child processes have finished."""
+    gates = performance_gate_config(manifest)
+    if not gates:
+        return False
+    any_failed = False
+    phase_avg_limits = gates.get("max_profile_avg_ms", {})
+    phase_max_limits = gates.get("max_profile_max_ms", {})
+    if not isinstance(phase_avg_limits, Mapping):
+        phase_avg_limits = {}
+    if not isinstance(phase_max_limits, Mapping):
+        phase_max_limits = {}
+    for name, item in state.get("experiments", {}).items():
+        performance = item.get("performance", {})
+        diagnostics = performance.get("runtime_diagnostics", {})
+        failures: List[str] = []
+
+        def check_max(key: str, label: str) -> None:
+            limit = gates.get(key)
+            if limit is None:
+                return
+            if key == "max_wall_seconds":
+                value = performance.get("wall_seconds")
+            elif key == "max_spent_seconds":
+                value = diagnostics.get("spent_seconds")
+            else:
+                value = performance.get(key)
+            if value is None or float(value) > float(limit):
+                failures.append(f"{label}={value} exceeds {limit}")
+
+        check_max("max_wall_seconds", "wall seconds")
+        check_max("max_spent_seconds", "Spent seconds")
+        limit_rss = gates.get("max_peak_rss_mb")
+        if limit_rss is not None:
+            value_rss = performance.get("peak_rss_mb")
+            if value_rss is None or float(value_rss) > float(limit_rss):
+                failures.append(f"peak RSS MB={value_rss} exceeds {limit_rss}")
+        for key, label in (
+            ("min_realtime_factor", "realtime factor"),
+            ("min_station_epochs_per_second", "station epochs/s"),
+        ):
+            limit = gates.get(key)
+            if limit is None:
+                continue
+            value_key = "realtime_factor" if key == "min_realtime_factor" else "station_epochs_per_second"
+            value = performance.get(value_key)
+            if value is None or float(value) < float(limit):
+                failures.append(f"{label}={value} below {limit}")
+
+        profiles = diagnostics.get("fgo_profiles", [])
+        event_counts = diagnostics.get("event_counts", {})
+        for gate_key, event_key, label in (
+            ("max_feedback_rejected", "feedback_rejected", "feedback rejected"),
+            ("max_covariance_fallback", "covariance_fallback", "covariance fallback"),
+            ("max_rank_deficient", "rank_deficient", "rank deficient"),
+            ("max_pseudo_inverse", "pseudo_inverse", "pseudo-inverse"),
+            ("max_raw_prepare_failed", "raw_prepare_failed", "RAW preparation failures"),
+        ):
+            limit = gates.get(gate_key)
+            if limit is not None:
+                value = event_counts.get(event_key, 0)
+                if value > int(limit):
+                    failures.append(f"{label}={value} exceeds {limit}")
+        if (phase_avg_limits or phase_max_limits or
+                gates.get("max_profile_attempts_per_window") is not None or
+                gates.get("max_profile_iterations") is not None):
+            if not profiles:
+                failures.append("FGO profile is missing")
+            for profile in profiles:
+                phases = profile.get("phases", {})
+                for phase, limit in phase_avg_limits.items():
+                    value = phases.get(phase, {}).get("avg_ms")
+                    if value is None or float(value) > float(limit):
+                        failures.append(f"{phase} avg ms={value} exceeds {limit}")
+                for phase, limit in phase_max_limits.items():
+                    value = phases.get(phase, {}).get("max_ms")
+                    if value is None or float(value) > float(limit):
+                        failures.append(f"{phase} max ms={value} exceeds {limit}")
+                averages = profile.get("raw_graph_averages", {})
+                for key, label in (
+                    ("max_profile_attempts_per_window", "RAW attempts/window"),
+                    ("max_profile_iterations", "Ceres iterations/solve"),
+                ):
+                    limit = gates.get(key)
+                    if limit is None:
+                        continue
+                    value_key = (
+                        "attempts_per_window"
+                        if key == "max_profile_attempts_per_window"
+                        else "ceres_iterations_per_solve"
+                    )
+                    value = averages.get(value_key)
+                    if value is None or float(value) > float(limit):
+                        failures.append(f"{label}={value} exceeds {limit}")
+
+        gate_result = {
+            "enabled": True,
+            "passed": not failures,
+            "limits": gates,
+            "failures": failures,
+        }
+        item["performance_gate"] = gate_result
+        if failures:
+            any_failed = True
+            item["status"] = "FAILED"
+            item.setdefault("errors", []).extend(f"performance gate: {failure}" for failure in failures)
+    return any_failed
 
 
 def terminate_process(entry: ProcessEntry) -> None:
@@ -796,6 +1132,9 @@ def run_analysis(
             groups.setdefault(key, []).append((experiment, output))
 
     analysis_options = dict(manifest.get("analysis", {}))
+    quality_options = analysis_options.get("quality_gates", {})
+    if isinstance(quality_options, Mapping):
+        analysis_options.update(quality_options)
     baseline_map = {str(key).upper(): value for key, value in dict(analysis_options.get("baselines", {})).items()}
     analysis_dir = run_dir / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -827,9 +1166,22 @@ def run_analysis(
             ("three_d_anomaly_threshold", "--three-d-anomaly-threshold"),
             ("min_nsat", "--min-nsat"),
             ("baseline_delta_threshold", "--baseline-delta-threshold"),
+            ("max_sustained_minutes", "--max-sustained-minutes"),
+            ("max_permanent_minutes", "--max-permanent-minutes"),
+            ("min_fixed_fraction", "--min-fixed-fraction"),
+            ("min_correct_fixed_fraction", "--min-correct-fixed-fraction"),
+            ("max_post_convergence_3d", "--max-post-convergence-3d"),
+            ("max_coordinate_jumps", "--max-coordinate-jumps"),
+            ("max_status_transitions", "--max-status-transitions"),
+            ("max_baseline_delta", "--max-baseline-delta"),
+            ("max_baseline_delta_exceedances", "--max-baseline-delta-exceedances"),
         ):
             if option in analysis_options:
                 command.extend([cli_name, str(analysis_options[option])])
+        if analysis_options.get("require_complete"):
+            command.append("--require-complete")
+        if analysis_options.get("fail_on_gate"):
+            command.append("--fail-on-gate")
         command.extend(["--markdown", str(markdown_path), "--json", str(json_path), "--quiet"])
         completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
         report: Dict[str, object] = {
@@ -840,6 +1192,20 @@ def run_analysis(
             "json": str(json_path),
             "exit_code": completed.returncode,
         }
+        if json_path.is_file():
+            try:
+                payload = json.loads(json_path.read_text(encoding="utf-8"))
+                gate_failures = []
+                for analyzed_case in payload.get("cases", []):
+                    gate = analyzed_case.get("quality_gate", {})
+                    for failure in gate.get("failures", []):
+                        gate_failures.append(
+                            f"{analyzed_case.get('label', 'case')}: {failure}"
+                        )
+                if gate_failures:
+                    report["quality_gate_failures"] = gate_failures
+            except (OSError, json.JSONDecodeError):
+                pass
         if completed.returncode != 0:
             report["error"] = (completed.stderr or completed.stdout).strip()[-2000:]
         reports.append(report)
@@ -860,8 +1226,6 @@ def minutes_from_start(epoch: Optional[float], nominal_start: float) -> Optional
 def analysis_rows(reports: Sequence[Mapping[str, object]]) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     for report in reports:
-        if report.get("status") != "PASSED":
-            continue
         try:
             payload = json.loads(Path(str(report["json"])).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -931,17 +1295,20 @@ def markdown_report(state: Mapping[str, object], analysis_reports: Sequence[Mapp
         "",
         "## Execution and performance",
         "",
-        "| Experiment | Product | Freq | Mode | Stations | Status | Wall s | Rows | Rows/s | Realtime x |",
-        "|---|---|---:|---|---:|---|---:|---:|---:|---:|",
+        "| Experiment | Product | Freq | Mode | Stations | Status | Wall s | Spent s | Peak RSS MB | Rows | Rows/s | Realtime x | FGO profiles |",
+        "|---|---|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, item in experiments.items():
         definition = item["definition"]
         performance = item.get("performance", {})
+        runtime = performance.get("runtime_diagnostics", {})
         lines.append(
             f"| {name} | {definition['product']} | {fmt(definition['frequency'], 0)} | "
             f"{definition['mode']} | {len(definition['stations'])} | {item['status']} | "
-            f"{fmt(performance.get('wall_seconds'))} | {fmt(performance.get('station_rows'), 0)} | "
-            f"{fmt(performance.get('station_epochs_per_second'))} | {fmt(performance.get('realtime_factor'))} |"
+            f"{fmt(performance.get('wall_seconds'))} | {fmt(runtime.get('spent_seconds'))} | "
+            f"{fmt(performance.get('peak_rss_mb'))} | {fmt(performance.get('station_rows'), 0)} | "
+            f"{fmt(performance.get('station_epochs_per_second'))} | "
+            f"{fmt(performance.get('realtime_factor'))} | {fmt(runtime.get('fgo_profile_count'), 0)} |"
         )
     matrix = state.get("performance", {})
     lines.extend(
@@ -989,11 +1356,29 @@ def markdown_report(state: Mapping[str, object], analysis_reports: Sequence[Mapp
                 lines.append(f"- `{match['path']}:{match['line']}`: {match['text']}")
             lines.append("")
 
+    analysis_failures = [
+        report for report in analysis_reports
+        if report.get("status") == "FAILED"
+    ]
+    if analysis_failures:
+        lines.extend(["## Analysis gate failures", ""])
+        for report in analysis_failures:
+            lines.append(f"### {report.get('station', 'analysis')}")
+            lines.append("")
+            for failure in report.get("quality_gate_failures", []):
+                lines.append(f"- {failure}")
+            if report.get("error"):
+                lines.append(f"- {report['error']}")
+            lines.append("")
+
     lines.extend(["## Artifacts", ""])
     lines.append(f"- Machine-readable state and results: `{Path(str(state['run_dir'])) / 'state.json'}`")
     for report in analysis_reports:
-        if report.get("status") == "PASSED":
-            lines.append(f"- {report['station']} accuracy report: `{report['markdown']}`")
+        if report.get("markdown"):
+            lines.append(
+                f"- {report['station']} accuracy report: `{report['markdown']}` "
+                f"({report.get('status', 'UNKNOWN')})"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -1137,6 +1522,8 @@ def run_command(args: argparse.Namespace) -> int:
         "poll_seconds": poll_seconds,
     }
 
+    performance_gate_failed = apply_performance_gates(state, manifest)
+
     analyzer_value = args.analyzer or manifest.get("analyzer", DEFAULT_ANALYZER)
     analysis_reports = [] if interrupted else run_analysis(
         experiments,
@@ -1147,7 +1534,7 @@ def run_command(args: argparse.Namespace) -> int:
         manifest,
     )
     analysis_failed = any(report.get("status") == "FAILED" for report in analysis_reports)
-    execution_failed = any(
+    execution_failed = performance_gate_failed or any(
         item["status"] not in ("PASSED",) for item in state["experiments"].values()
     )
     state["analysis"] = analysis_reports

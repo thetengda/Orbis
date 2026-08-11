@@ -21,6 +21,12 @@ The final report includes process and matrix wall time, station epochs per
 second, real-time factor, fixed rate, first sustained/permanent convergence,
 first correct fixed epoch, and 3D RMS/MAE/P95/P99/maximum error.
 
+The JSON analysis also includes status counts, baseline epoch matching, hourly
+statistics, anomaly intervals, coordinate jumps, and optional quality gates.
+The runner extracts `Spent` and DEBUG FGO phase timing when those lines are
+present, including RAW/Ceres phase min/mean/max/total times, graph dimensions,
+and average solver iterations.
+
 ## Single experiment
 
 Paths passed on the command line are relative to the repository root. For the
@@ -75,6 +81,37 @@ The important manifest fields are:
   ]
 }
 ```
+
+Quality gates are opt-in so existing reports remain diagnostic-only. They can
+be placed directly under `analysis` or under `analysis.quality_gates`:
+
+```json
+{
+  "analysis": {
+    "require_complete": true,
+    "fail_on_gate": true,
+    "max_sustained_minutes": 5.0,
+    "max_permanent_minutes": 10.0,
+    "min_correct_fixed_fraction": 0.95,
+    "max_post_convergence_3d": 0.10,
+    "max_coordinate_jumps": 0,
+    "max_status_transitions": 2
+  },
+  "performance_gates": {
+    "max_wall_seconds": 120.0,
+    "min_realtime_factor": 10.0,
+    "max_peak_rss_mb": 1500.0,
+    "max_profile_avg_ms": {"raw.solve": 120.0},
+    "max_profile_iterations": 25.0,
+    "max_feedback_rejected": 0,
+    "max_pseudo_inverse": 0
+  }
+}
+```
+
+Without `fail_on_gate`, quality-gate failures are written to the report but do
+not change the process exit code. Performance gates are enforced whenever the
+`performance_gates` block is present.
 
 Each concurrently running configuration must use distinct output paths. The
 runner intentionally does not delete or rename existing result files; it checks

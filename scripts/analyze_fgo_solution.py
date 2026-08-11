@@ -42,6 +42,7 @@ import json
 import math
 import statistics
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -236,6 +237,8 @@ def accuracy_metrics(errors: Sequence[ErrorRow]) -> Dict[str, object]:
     correct_fixed_count = sum(
         row.correct and row.status.lower() == "fixed" for row in errors
     )
+    status_counts = Counter(row.status.strip().upper() for row in errors)
+    known_statuses = {"FIXED", "FLOAT"}
     return {
         "count": len(errors),
         "east_bias_m": statistics.fmean(east) if east else None,
@@ -263,6 +266,10 @@ def accuracy_metrics(errors: Sequence[ErrorRow]) -> Dict[str, object]:
         "correct_fraction": correct_count / len(errors) if errors else None,
         "correct_fixed_count": correct_fixed_count,
         "correct_fixed_fraction": correct_fixed_count / len(errors) if errors else None,
+        "status_counts": dict(sorted(status_counts.items())),
+        "unknown_status_count": sum(
+            count for status, count in status_counts.items() if status not in known_statuses
+        ),
         "detailed": {
             "east": component_statistics(east, signed_component=True),
             "north": component_statistics(north, signed_component=True),
@@ -297,7 +304,7 @@ def continuity_metrics(
     out_of_span_epochs = [
         row.sow
         for row in rows
-        if row.sow < nominal_start + interval - 1e-6
+        if row.sow < nominal_start - 1e-6
         or row.sow > nominal_end - interval + 1e-6
     ]
     return {
@@ -307,7 +314,7 @@ def continuity_metrics(
         "start_sow": rows[0].sow if rows else None,
         "end_sow": rows[-1].sow if rows else None,
         "start_delay_s": (
-            rows[0].sow - (nominal_start + interval) if rows else None
+            rows[0].sow - nominal_start if rows else None
         ),
         "end_shortfall_s": (
             (nominal_end - interval) - rows[-1].sow if rows else None
@@ -474,7 +481,7 @@ def anomaly_metrics(
 
 def baseline_metrics(
     rows: Sequence[SolutionRow], baseline_by_epoch: Dict[float, SolutionRow]
-) -> Tuple[Dict[str, Optional[float]], List[Dict[str, float]]]:
+) -> Tuple[Dict[str, object], List[Dict[str, float]]]:
     deltas: List[Tuple[float, float]] = []
     for row in rows:
         baseline = baseline_by_epoch.get(row.sow)
@@ -486,7 +493,11 @@ def baseline_metrics(
     values = [value for _, value in deltas]
     return (
         {
+            "solution_epochs": len(rows),
+            "baseline_epochs": len(baseline_by_epoch),
             "matched_epochs": len(values),
+            "unmatched_solution_epochs": max(0, len(rows) - len(values)),
+            "matched_fraction": len(values) / len(rows) if rows else None,
             "three_d_mean_m": statistics.fmean(values) if values else None,
             "three_d_mae_m": statistics.fmean(values) if values else None,
             "three_d_rms_m": rms(values),
@@ -623,6 +634,123 @@ def analyze_case(
     }
 
 
+def _minutes_from_epoch(epoch: Optional[float], nominal_start: float) -> Optional[float]:
+    if epoch is None:
+        return None
+    return (epoch - nominal_start) / 60.0
+
+
+def quality_gate_metrics(case: Dict[str, object], args: argparse.Namespace) -> Dict[str, object]:
+    """Evaluate optional acceptance gates without changing the raw statistics."""
+    configured = any(
+        value is not None
+        for value in (
+            args.max_sustained_minutes,
+            args.max_permanent_minutes,
+            args.min_fixed_fraction,
+            args.min_correct_fixed_fraction,
+            args.max_post_convergence_3d,
+            args.max_coordinate_jumps,
+            args.max_status_transitions,
+            args.max_baseline_delta,
+            args.max_baseline_delta_exceedances,
+        )
+    ) or args.require_complete or args.fail_on_gate
+    failures: List[str] = []
+    continuity = case["continuity"]
+    parse = case["parse"]
+    convergence = case["convergence"]
+    warm_accuracy = case["accuracy_after_warmup"]
+    anomalies = case["anomalies"]
+    baseline = case["baseline_comparison_after_warmup"]
+
+    if parse["malformed_lines"]:
+        failures.append(f"malformed output lines={parse['malformed_lines']}")
+    if parse["nonfinite_xyz"]:
+        failures.append(f"non-finite coordinates={parse['nonfinite_xyz']}")
+    if args.require_complete and not continuity["complete_nominal_span"]:
+        failures.append("output is not a complete nominal time grid")
+
+    first_sustained = _minutes_from_epoch(
+        convergence["first_sustained_convergence_epoch"], args.nominal_start_sow
+    )
+    permanent = _minutes_from_epoch(
+        convergence["permanent_convergence_epoch"], args.nominal_start_sow
+    )
+    if args.max_sustained_minutes is not None and (
+        first_sustained is None or first_sustained > args.max_sustained_minutes
+    ):
+        failures.append(
+            f"first sustained convergence={first_sustained} min exceeds "
+            f"{args.max_sustained_minutes} min"
+        )
+    if args.max_permanent_minutes is not None and (
+        permanent is None or permanent > args.max_permanent_minutes
+    ):
+        failures.append(
+            f"permanent convergence={permanent} min exceeds "
+            f"{args.max_permanent_minutes} min"
+        )
+
+    for label, value, threshold in (
+        ("Fixed fraction", warm_accuracy["fixed_fraction"], args.min_fixed_fraction),
+        (
+            "correct Fixed fraction",
+            warm_accuracy["correct_fixed_fraction"],
+            args.min_correct_fixed_fraction,
+        ),
+    ):
+        if threshold is not None and (value is None or value < threshold):
+            failures.append(f"{label}={value} below {threshold}")
+
+    stable_accuracy = case["accuracy_after_permanent_convergence"]
+    if not stable_accuracy["count"]:
+        stable_accuracy = case["accuracy_after_sustained_convergence"]
+    if args.max_post_convergence_3d is not None and (
+        stable_accuracy["three_d_max_m"] is None
+        or stable_accuracy["three_d_max_m"] > args.max_post_convergence_3d
+    ):
+        failures.append(
+            f"post-convergence 3D max={stable_accuracy['three_d_max_m']} exceeds "
+            f"{args.max_post_convergence_3d} m"
+        )
+    if args.max_coordinate_jumps is not None and len(anomalies["coordinate_jumps"]) > args.max_coordinate_jumps:
+        failures.append(
+            f"coordinate jumps={len(anomalies['coordinate_jumps'])} exceeds "
+            f"{args.max_coordinate_jumps}"
+        )
+    if args.max_status_transitions is not None and len(anomalies["status_transitions"]) > args.max_status_transitions:
+        failures.append(
+            f"status transitions={len(anomalies['status_transitions'])} exceeds "
+            f"{args.max_status_transitions}"
+        )
+    if args.max_baseline_delta is not None:
+        if not baseline["baseline_epochs"]:
+            failures.append("baseline is required for max baseline delta gate")
+        elif baseline["three_d_max_m"] is not None and (
+            baseline["three_d_max_m"] > args.max_baseline_delta
+        ):
+            failures.append(
+                f"baseline 3D max={baseline['three_d_max_m']} exceeds "
+                f"{args.max_baseline_delta} m"
+            )
+    if args.max_baseline_delta_exceedances is not None:
+        if not baseline["baseline_epochs"]:
+            failures.append("baseline is required for baseline delta exceedance gate")
+        elif len(anomalies["baseline_delta_exceedances"]) > args.max_baseline_delta_exceedances:
+            failures.append(
+                f"baseline delta exceedances={len(anomalies['baseline_delta_exceedances'])} exceeds "
+                f"{args.max_baseline_delta_exceedances}"
+            )
+    return {
+        "enabled": configured,
+        "enforced": bool(args.fail_on_gate),
+        "passed": not failures,
+        "failures": failures,
+        "reference_period": "after_warmup for Fixed fractions; after permanent convergence (or sustained convergence) for stable accuracy",
+    }
+
+
 def format_number(value: object, digits: int = 4) -> str:
     if value is None:
         return "—"
@@ -661,8 +789,8 @@ def markdown_report(report: Dict[str, object]) -> str:
         "",
         "## 总览",
         "",
-        "| 模式 | 行数/期望/连续 | 全段 3D RMS | 热启动后 3D RMS / MAE / p95 / p99 / max | Fixed | 热启动正确率 | 热启动正确 Fixed 率 | 首次达标 | 首次持续收敛 | 永久收敛 | 首次 Fixed | 首次正确 Fixed | 热启动后相对 FLT RMS |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| 模式 | 行数/期望/连续 | Gate | 全段 3D RMS | 热启动后 3D RMS / MAE / p95 / p99 / max | Fixed | 热启动正确率 | 热启动正确 Fixed 率 | 首次达标 | 首次持续收敛 | 永久收敛 | 首次 Fixed | 首次正确 Fixed | 热启动后相对 FLT RMS |",
+        "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for case in report["cases"]:
         all_accuracy = case["accuracy_all"]
@@ -671,7 +799,7 @@ def markdown_report(report: Dict[str, object]) -> str:
         baseline = case["baseline_comparison_after_warmup"]
         fixed_fraction = all_accuracy["fixed_fraction"]
         lines.append(
-            "| {label} | {rows}/{continuous} | {all_rms} | {warm_rms} / {mae} / {p95} / {p99} / {maxv} | "
+            "| {label} | {rows}/{continuous} | {gate} | {all_rms} | {warm_rms} / {mae} / {p95} / {p99} / {maxv} | "
             "{fixed} | {correct} | {correct_fixed} | {first} | {sustained} | {permanent} | {first_fixed} | "
             "{first_correct_fixed} | {baseline_rms} |".format(
                 label=case["label"],
@@ -683,6 +811,11 @@ def markdown_report(report: Dict[str, object]) -> str:
                     "complete"
                     if case["continuity"]["complete_nominal_span"]
                     else ("internal yes" if case["continuity"]["continuous"] else "no")
+                ),
+                gate=(
+                    "PASS"
+                    if case["quality_gate"]["enabled"] and case["quality_gate"]["passed"]
+                    else "FAIL" if case["quality_gate"]["enabled"] else "OFF"
                 ),
                 all_rms=format_number(all_accuracy["three_d_rms_m"]),
                 warm_rms=format_number(warm["three_d_rms_m"]),
@@ -716,6 +849,18 @@ def markdown_report(report: Dict[str, object]) -> str:
                 baseline_rms=format_number(baseline["three_d_rms_m"]),
             )
         )
+
+    for case in report["cases"]:
+        gate = case["quality_gate"]
+        if gate["enabled"]:
+            lines.extend(
+                [
+                    "",
+                    f"质量门禁（{case['label']}）：{'通过' if gate['passed'] else '失败'}；"
+                    f"{'已强制执行' if gate['enforced'] else '仅报告'}。",
+                ]
+            )
+            lines.extend(f"- {failure}" for failure in gate["failures"])
 
     lines.extend(["", "## 分模式统计与异常", ""])
     for case in report["cases"]:
@@ -799,13 +944,19 @@ def markdown_report(report: Dict[str, object]) -> str:
         lines.extend(
             [
                 "",
-                "| 热启动后同历元相对 FLT | 匹配历元 | MAE | RMS | P50 | P68 | P90 | P95 | P99 | max |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+                "| 热启动后同历元相对 FLT | 匹配历元/解算历元 | 匹配率 | MAE | RMS | P50 | P68 | P90 | P95 | P99 | max |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
                 (
-                    "| 3D 差值 | {matched} | {mae} | {rmsv} | {p50} | {p68} | {p90} | "
+                    "| 3D 差值 | {matched}/{solution} | {fraction} | {mae} | {rmsv} | {p50} | {p68} | {p90} | "
                     "{p95} | {p99} | {maxv} |"
                 ).format(
                     matched=baseline["matched_epochs"],
+                    solution=baseline["solution_epochs"],
+                    fraction=format_number(
+                        100.0 * baseline["matched_fraction"]
+                        if baseline["matched_fraction"] is not None else None,
+                        2,
+                    ) + "%",
                     mae=format_number(baseline["three_d_mae_m"]),
                     rmsv=format_number(baseline["three_d_rms_m"]),
                     p50=format_number(baseline["three_d_p50_m"]),
@@ -843,6 +994,14 @@ def markdown_report(report: Dict[str, object]) -> str:
                     f"起点延迟={format_number(continuity['start_delay_s'], 1)} s，"
                     f"末端缺失={format_number(continuity['end_shortfall_s'], 1)} s，"
                     f"覆盖率={format_number(100.0 * continuity['coverage_fraction'], 2)}%。"
+                ),
+                (
+                    "状态计数："
+                    + ", ".join(
+                        f"{status}={count}"
+                        for status, count in case["accuracy_all"]["status_counts"].items()
+                    )
+                    + f"；未知状态={case['accuracy_all']['unknown_status_count']}。"
                 ),
                 "",
                 (
@@ -980,6 +1139,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--three-d-anomaly-threshold", type=float, default=0.10)
     parser.add_argument("--min-nsat", type=int, default=10)
     parser.add_argument("--baseline-delta-threshold", type=float, default=0.10)
+    # Optional acceptance gates; statistics remain available when gates are off.
+    parser.add_argument("--require-complete", action="store_true", help="require a complete nominal time grid")
+    parser.add_argument("--max-sustained-minutes", type=float)
+    parser.add_argument("--max-permanent-minutes", type=float)
+    parser.add_argument("--min-fixed-fraction", type=float)
+    parser.add_argument("--min-correct-fixed-fraction", type=float)
+    parser.add_argument("--max-post-convergence-3d", type=float)
+    parser.add_argument("--max-coordinate-jumps", type=int)
+    parser.add_argument("--max-status-transitions", type=int)
+    parser.add_argument("--max-baseline-delta", type=float)
+    parser.add_argument("--max-baseline-delta-exceedances", type=int)
+    parser.add_argument("--fail-on-gate", action="store_true", help="return non-zero when an enabled quality gate fails")
     parser.add_argument("--markdown", type=Path, help="optional Markdown output path")
     parser.add_argument("--json", type=Path, help="optional JSON output path")
     parser.add_argument("--quiet", action="store_true", help="do not print Markdown to stdout")
@@ -1005,6 +1176,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     baseline_by_epoch = {row.sow: row for row in baseline_rows}
 
     cases: List[Dict[str, object]] = []
+    gate_failed = False
     seen_labels = set()
     for label, path in args.case:
         if label in seen_labels:
@@ -1013,17 +1185,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not path.is_file():
             parser.error(f"case does not exist: {path}")
         rows, diagnostics = read_solution(path)
-        cases.append(
-            analyze_case(
-                label,
-                path,
-                rows,
-                diagnostics,
-                tuple(args.reference),
-                args,
-                baseline_by_epoch,
-            )
+        case = analyze_case(
+            label,
+            path,
+            rows,
+            diagnostics,
+            tuple(args.reference),
+            args,
+            baseline_by_epoch,
         )
+        case["quality_gate"] = quality_gate_metrics(case, args)
+        gate_failed = gate_failed or (
+            case["quality_gate"]["enabled"] and not case["quality_gate"]["passed"]
+        )
+        cases.append(case)
 
     report: Dict[str, object] = {
         "schema_version": 1,
@@ -1043,6 +1218,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "min_nsat": args.min_nsat,
             "baseline_delta_threshold_m": args.baseline_delta_threshold,
             "baseline": str(args.baseline) if args.baseline else None,
+            "quality_gates": {
+                "require_complete": args.require_complete,
+                "max_sustained_minutes": args.max_sustained_minutes,
+                "max_permanent_minutes": args.max_permanent_minutes,
+                "min_fixed_fraction": args.min_fixed_fraction,
+                "min_correct_fixed_fraction": args.min_correct_fixed_fraction,
+                "max_post_convergence_3d": args.max_post_convergence_3d,
+                "max_coordinate_jumps": args.max_coordinate_jumps,
+                "max_status_transitions": args.max_status_transitions,
+                "max_baseline_delta": args.max_baseline_delta,
+                "max_baseline_delta_exceedances": args.max_baseline_delta_exceedances,
+                "fail_on_gate": args.fail_on_gate,
+            },
         },
         "cases": cases,
     }
@@ -1058,7 +1246,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if not args.quiet:
         sys.stdout.write(markdown)
-    return 0
+    return 1 if args.fail_on_gate and gate_failed else 0
 
 
 if __name__ == "__main__":
