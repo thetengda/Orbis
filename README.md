@@ -1,173 +1,165 @@
-# GREAT-PIFGO: PPP/INS Factor Graph Optimization-Based Positioning and Navigation Software by Wuhan University GREAT Group (Version 1.0)
+# Orbis
 
-## Overview
+Orbis 是一个面向高精度 GNSS 定位与导航的 C++ 软件项目，提供传统滤波（FLT）和因子图优化（FGO）两条解算流程。项目面向 PPP、RTK 及 PPP/INS 紧耦合等应用，重点支持多系统、多频观测、模糊度固定和可重复的结果评估。
 
-  The GREAT (GNSS+ **RE**search, **A**pplication and **T**eaching) software suite is designed and developed by the School of Geodesy and Geomatics, Wuhan University. It is a comprehensive platform for space geodesy data processing, precise positioning and orbit determination, as well as multi-source fusion navigation. <br />
-  GREAT-PIFGO is a key module within the GREAT software, dedicated to Factor Graph Optimization (FGO) based navigation solutions. It supports a variety of algorithms including PPP, PPP/INS, and multi-sensor fusion. In the software, core computation modules are implemented in C++, while auxiliary Python 3 scripts are provided for plotting results. GREAT-PIFGO uses CMAKE for build management, allowing users to flexibly choose mainstream C++ compilers such as GCC, Clang, and MSVC. It currently supports build and execution on Windows; for Linux, users are encouraged to compile and test locally. <br />
-  GREAT-PIFGO consists of two portable program libraries: LibGREAT and LibGnut. In addition to the GNSS positioning solutions from the original GREAT-PVT and the multi-sensor fusion navigation capabilities provided by GREAT-MSF, GREAT-PIFGO delivers PPP and tightly-coupled PPP/INS algorithms based on factor graph optimization. <br />
-  This open-sourced GREAT-PIFGO version 1.0 supports the following capabilities:
+> 当前仓库处于持续开发阶段。配置项、输出格式和实验脚本可能随版本演进，请以当前源码和配置文件为准。
 
-1.Supports PPP positioning based on factor graph optimization 
+## 主要能力
 
-2.Supports tightly-coupled PPP/INS integration based on factor graph optimization
+- 基于 Ceres 的滑动窗口因子图优化、重线性化与边缘化。
+- 基于滤波器的定位流程，可作为 FGO 的结果基线。
+- PPP 原始观测（`RAW_ALL`）和无电离层组合（`IONO_FREE`）处理。
+- GPS、Galileo、BDS-2/3、GLONASS 等卫星系统。
+- 多频载波相位与码观测，包含五频模糊度、IFB 等参数路径。
+- UPD 和 OSB 产品支持，以及浮点、参数反馈和约束反馈模式。
+- PPP/INS 紧耦合和多源融合应用程序。
+- 结果文件、日志和统计报告生成，以及 FGO/FLT 对照分析工具。
 
-3.Supports satellite navigation systems including GPS, Galileo, BDS-2/3，GLONASS
+FGO 的 `RAW_MIX` 目前仅完成配置解析，原始观测因子图暂不支持该模式；请使用 `RAW_ALL` 或 `IONO_FREE`。
 
-4.Supports custom IMU data formats and noise models
+## 仓库结构
 
-5.Support for trajectory visualization and Google Maps viewing
-
-6.The software package also provides plotting scripts for positioning results to facilitate user data analysis
-
-
-## Package Directory Structure
-
-```shell
-GREAT-PIFGO
-  ./src                   Source code *
-    ./app                 Main programs of GREAT-PVTFGO, GREAT-GINSFGO, GREAT-MSF and GREAT-PVT *
-    ./LibGREAT            Core algorithm library for Factor Graph Optimization*
-    ./LibGnut             Gnut library *
-    ./Third-party         Third-party libraries *
-  ./sample_data           Example datasets *
-  ./doc                   Documentation related to GREAT-PIFGO *
+```text
+Orbis/
+├── src/
+│   ├── LibGREAT/       FGO、GNSS、模糊度和融合算法库
+│   ├── LibGnut/        GNSS 数据、产品和通用工具库
+│   └── app/            应用程序入口
+├── sample_data/        示例观测、导航和精密产品
+├── scripts/            实验启动、监控和结果分析脚本
+└── doc/                测试记录与设计说明
 ```
 
-## Installation and Usage
+## 编译环境
 
-See **GREAT-PIFGO Documentation.pdf** included in the **./doc** directory.
+- CMake 3.21 或更高版本。
+- 支持 C++17 的编译器：MSVC、GCC 或 Clang。
+- Eigen3、Ceres 2.x、GLFW、pugixml 和 spdlog。
+- Windows 构建依赖可通过项目中的 vcpkg 配置准备；Linux/macOS 需要自行安装对应开发包。
 
+## 编译
 
-## Contributing
+在仓库根目录执行：
 
-Developers:
-
-Wuhan University GREAT Team, Wuhan University.
-
-Third-party libraries:
-
-* GREAT-PIFGO uses the G-Nut library ([http://www.pecny.cz](http://www.pecny.cz))
-  Copyright (C) 2011–2016 GOP - Geodetic Observatory Pecny, RIGTC.
-
-* GREAT-PIFGO uses the pugixml library ([http://pugixml.org](http://pugixml.org))
-  Copyright (C) 2006–2014 Arseny Kapoulkine.
-
-* GREAT-PIFGO uses the Newmat library ([http://www.robertnz.net/nm_intro.htm](http://www.robertnz.net/nm_intro.htm))
-  Copyright (C) 2008: R B Davies.
-
-* GREAT-PIFGO uses the spdlog library ([https://github.com/gabime/spdlog](https://github.com/gabime/spdlog))
-  Copyright (C) 2015–present, Gabi Melman & spdlog contributors.
-
-* GREAT-PIFGO uses the GLFW library ([https://www.glfw.org](https://www.glfw.org))
-  Copyright (C) 2002–2006 Marcus Geelnard, Copyright (C) 2006–2019 Camilla Löwy
-
-* GREAT-PIFGO uses the Eigen library ([https://eigen.tuxfamily.org](https://eigen.tuxfamily.org))
-  Copyright (C) 2008–2011 Gael Guennebaud
-
-* GREAT-PIFGO uses the PSINS library ([https://psins.org.cn](https://psins.org.cn))
-  Copyright (c) 2015–2025 Gongmin Yan
-
-* GREAT-PIFGO uses the Ceres library ([http://ceres-solver.org](http://ceres-solver.org))
-  Copyright 2023 Google Inc.
-
-## Download
-
-GitHub: [https://github.com/GREAT-WHU/GREAT-PIFGO](https://github.com/GREAT-WHU/GREAT-PIFGO)
-
-## Others
-
-You are welcome to join the QQ group (1009827379) for discussion and exchange.
-
-WeChat Official Account: **GREAT智能导航实验室** — we will continue to share team updates.
-
-bilibili Account: **GREAT智能导航实验室** — we will continue to publish software walkthrough videos.
-
----
-
-
-
-
-
-# GREAT-PIFGO: 武汉大学GREAT团队基于因子图优化的PPP/INS定位导航解算软件（1.0版）
-
-## 概述
-
-&emsp;&emsp;GREAT (GNSS+ REsearch, Application and Teaching) 软件由武汉大学测绘学院设计开发，是一个用于空间大地测量数据处理、精密定位和定轨以及多源融合导航的综合性软件平台。<br />
-&emsp;&emsp;GREAT-PIFGO是GREAT软件中的一个重要模块，主要用于因子图优化 (Factor Graph Optimization) 导航解算，包括PPP、PPP/INS与多传感器融合等多种算法。软件中，核心计算模块使用C++语言编写，辅助脚本模块使用Python3语言实现结果绘制。GREAT-PIFGO软件使用CMake工具进行编译管理，用户可以灵活选择GCC、Clang、MSVC等主流C++编译器。目前支持在Windows下编译运行，Linux系统需要用户自行编译测试。<br />
-&emsp;&emsp;GREAT-PIFGO由2个可移植程序库组成，分别是LibGREAT和LibGnut。除了原GREAT-PVT中的GNSS定位解决方案、GREAT-MSF提供的多传感器融合导航功能外，GREAT-PIFGO提供了基于因子图优化的PPP与PPP/INS紧耦合算法。<br />
-&emsp;&emsp;本次开源的GREAT-PIFGO 1.0版本支持以下功能：
-
-	1.支持基于因子图优化的RTK解算
-	
-	2.支持基于因子图优化的PPP/INS紧耦合解算
-	
-	3.支持GPS、Galileo、BDS-2/3、GLONASS卫星导航系统
-	
-	4.支持自定义IMU数据格式、噪声模型
-	
-	5.支持轨迹动态显示与谷歌地图查看
-	
-	6.软件包还提供定位结果绘图脚本，便于用户对数据进行结果分析
-
-
-
-## 软件包目录结构
-```shell
-GREAT-PIFGO
-  ./src                     源代码 *
-    ./app                  GREAT-PVTFGO、GREAT-GINSFGO、GREAT-MSF和GREAT-PVT主程序 *
-    ./LibGREAT             因子图优化核心算法库 *
-    ./LibGnut              Gnut库 *
-    ./Third-party          第三方库 *
-  ./sample_data          算例数据 *
-  ./doc                  GREAT-PIFGO相关文档 *
+```powershell
+cmake -S src -B build -G "Visual Studio 18 2026" -A x64
+cmake --build build --config Release --parallel
 ```
 
-## 安装和使用
+Linux 示例：
 
-参见**doc**文件夹中的《GREAT-PIFGO说明文档 1.0.pdf》或关注我们团队后续在视频网站bilibili发布的讲解视频。
+```bash
+cmake -S src -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
 
+主要应用目标为：
 
+- `GREAT_PVT`：GNSS 定位，可通过 XML 选择 FLT 或 FGO。
+- `GREAT_GINSFGO`：PPP/INS 紧耦合 FGO。
+- `GREAT_MSF`：多源融合应用。
 
-## 参与贡献
+应用目标名称暂保留原有兼容名称，但项目对外名称为 Orbis。
 
-开发人员：
+## 运行
 
-武汉大学GREAT团队, Wuhan University.
+Orbis 使用 XML 配置文件描述输入数据、精密产品、观测组合、解算器、输出路径和日志设置。以 GNSS 定位程序为例：
 
-三方库：
+```powershell
+.\build\Bin\Release\GREAT_PVT.exe `
+  -x .\path\to\config.xml
+```
 
-* GREAT-PIFGO使用G-Nut库(http://www.pecny.cz)
-  Copyright (C) 2011-2016 GOP - Geodetic Observatory Pecny, RIGTC.
-  
-* GREAT-PIFGO使用pugixml库(http://pugixml.org)
-  Copyright (C) 2006-2014 Arseny Kapoulkine.
+也可以在配置文件后追加节点或属性覆盖，例如指定测站和日志名：
 
-* GREAT-PIFGO使用Newmat库(http://www.robertnz.net/nm_intro.htm)
-  Copyright (C) 2008: R B Davies.
+```powershell
+.\build\Bin\Release\GREAT_PVT.exe `
+  -x .\path\to\config.xml `
+  node:config:gen:rec=GODN `
+  attr:config:outputs:log:name=GODN_run
+```
 
-* GREAT-PIFGO使用spdlog库(https://github.com/gabime/spdlog)
-  Copyright(C) 2015-present, Gabi Melman & spdlog contributors.
+FGO 配置中的关键选择包括：
 
-* GREAT-PIFGO使用GLFW库(https://www.glfw.org)
-  Copyright (C) 2002-2006 Marcus Geelnard, Copyright (C) 2006-2019 Camilla Löwy
+- `estimator`：`FGO` 或 `FLT`。
+- `obs_combin`：`RAW_ALL` 或 `IONO_FREE`。
+- `fix_mode`：浮点或模糊度搜索固定。
+- `ambiguity_feedback_mode`：`NONE`、`PARAMETER` 或 `CONSTRAINT`。
+- `upd_mode`：按配置选择 UPD 或 OSB 产品。
 
-* GREAT-PIFGO使用Eigen库(https://eigen.tuxfamily.org)
-  Copyright (C) 2008-2011 Gael Guennebaud
+启用 FGO 模糊度反馈时，应使用 `RAW_ALL` 并同时启用模糊度固定。窗口大小、GNSS 窗口大小和 INS 窗口大小不能超过源码编译时的容量上限。
 
-* GREAT-PIFGO使用PSINS库(https://psins.org.cn)
-  Copyright(c) 2015-2025 Gongmin Yan
+## 实验与结果分析
 
-* GREAT-PIFGO使用Ceres 库(http://ceres-solver.org)
-  Copyright 2023 Google Inc.
-## 下载地址
+`scripts/run_fgo_experiments.py` 可启动单个实验或并行实验矩阵，并持续记录状态、日志、性能和精度报告。示例：
 
-GitHub：https://github.com/GREAT-WHU/GREAT-PIFGO
+```powershell
+.\.venv\Scripts\python.exe scripts\run_fgo_experiments.py run `
+  --manifest scripts\fgo_experiment_matrix.example.json `
+  --run-id orbis_ff_30m
+```
 
-## 其它
+查看运行状态：
 
-欢迎加入QQ群(1009827379)参与讨论与交流。
+```powershell
+.\.venv\Scripts\python.exe scripts\run_fgo_experiments.py status `
+  --run-dir build\fgo_runs\orbis_ff_30m
+```
 
-微信公众号：GREAT智能导航实验室，我们将持续推送团队成果。
+实验目录通常包含：
 
-bilibili账号：GREAT智能导航实验室，我们将持续发布软件讲解视频。
+- `state.json`：当前进度和最终状态。
+- `logs/`：各进程的标准输出与错误输出。
+- `analysis/`：单站 Markdown/JSON 统计报告。
+- `report.md`：实验矩阵汇总。
+
+分析脚本支持收敛时间、首次正确固定时间、固定率、三维 RMS、平均绝对误差、最大误差以及 P95/P99 误差分位数等指标。并行实验必须为每个进程配置独立的输出文件，避免结果相互覆盖。
+
+## 输出文件
+
+输出格式由 XML 配置决定，常见文件包括：
+
+- `.fgo`：因子图优化结果。
+- `.flt`：滤波结果及模糊度解算结果。
+- `.log`：运行日志。
+
+FGO 与 FLT 的结果文件应使用独立路径；分析脚本会检查文件是否由当前进程实际更新、历元是否连续以及坐标是否有限。
+
+## 开发说明
+
+- 修改观测模型、状态维度或边缘化接口后，应进行全量重新编译。
+- RAW 因子涉及轨道、钟差、潮汐、光行时、姿态和偏导计算；修改并行化或缓存逻辑时必须与串行结果进行逐项对照。
+- 五频测试应同时检查 IFB 参数是否由实际观测因子激活，避免不可观参数进入协方差和模糊度固定流程。
+- 运行记录和异常历元分析统一保存在 `doc/` 或实验运行目录中。
+
+## 第三方组件
+
+Orbis 使用以下开源组件：
+
+- [Eigen](https://eigen.tuxfamily.org)
+- [Ceres Solver](https://ceres-solver.org)
+- [GLFW](https://www.glfw.org)
+- [pugixml](https://pugixml.org)
+- [spdlog](https://github.com/gabime/spdlog)
+- [Newmat](http://www.robertnz.net/nm_intro.htm)
+- [G-Nut](http://www.pecny.cz)
+- [PSINS](https://psins.org.cn)
+
+各组件的版权和许可证以其随附文件及官方发布说明为准。
+
+## 许可证与贡献
+
+如果需要提交问题、改进代码或补充实验，请提供：
+
+1. 使用的提交版本和操作系统；
+2. XML 配置及输入产品的基本信息；
+3. 可复现的命令行、日志和异常历元；
+4. 对应的 `.fgo`/`.flt` 结果或统计报告。
+
+## 项目链接
+
+[https://github.com/thetengda/Orbis](https://github.com/thetengda/Orbis)
+
+## 致谢
+
+感谢 GREAT 项目及其开发团队提供的开源基础与支持。
