@@ -9,12 +9,30 @@
  * 
  */
 #include "gpvtflt.h"
+#include "gdata/gephprec.h"
 #include "gutils/gtimesync.h"
 #include "gmodels/gprecisebias.h"
 #include "gmodels/gprecisebiasGPP.h"
 #include <algorithm>
 #include "gproc/gqualitycontrol.h"
 #include "gio/grtlog.h"
+#include <chrono>
+
+namespace
+{
+    const char *observation_model_name(gnut::OBSCOMBIN mode)
+    {
+        switch (mode)
+        {
+        case gnut::OBSCOMBIN::IONO_FREE: return "IONO_FREE";
+        case gnut::OBSCOMBIN::RAW_SINGLE: return "RAW_SINGLE";
+        case gnut::OBSCOMBIN::RAW_DOUBLE: return "RAW_DOUBLE";
+        case gnut::OBSCOMBIN::RAW_ALL: return "RAW_ALL";
+        case gnut::OBSCOMBIN::RAW_MIX: return "RAW_MIX";
+        default: return "DEFAULT";
+        }
+    }
+}
 
 great::t_gpvtflt::t_gpvtflt(string mark, string mark_base, t_gsetbase *gset, t_gallproc *allproc)
     : t_gspp(mark, gset),
@@ -1565,6 +1583,26 @@ int great::t_gpvtflt::_processEpoch(const t_gtime &runEpoch)
 
 int great::t_gpvtflt::_amb_resolution()
 {
+	_last_ambiguity_mode_ms.fill(0.0);
+	_last_ambiguity_stage_ms.fill(0.0);
+	auto timed_process_batch = [&](size_t timing_index, const char *mode)
+	{
+		const auto begin = std::chrono::steady_clock::now();
+		const int result = _ambfix->processBatch(_epoch, _filter, mode);
+		const auto end = std::chrono::steady_clock::now();
+		_last_ambiguity_mode_ms[timing_index] =
+			std::chrono::duration<double, std::milli>(end - begin).count();
+		const auto &timing = _ambfix->lastBatchTiming();
+		_last_ambiguity_stage_ms[0] += timing.setup;
+		_last_ambiguity_stage_ms[1] += timing.dependence;
+		_last_ambiguity_stage_ms[2] += timing.define_dd;
+		_last_ambiguity_stage_ms[3] += timing.combination;
+		_last_ambiguity_stage_ms[4] += timing.correction;
+		_last_ambiguity_stage_ms[5] += timing.selection;
+		_last_ambiguity_stage_ms[6] += timing.lambda;
+		_last_ambiguity_stage_ms[7] += timing.feedback;
+		return result;
+	};
     ColumnVector dx_tmp = _filter->dx();
     SymmetricMatrix Qx_tmp = _filter->Qx();
     _param_fixed = _filter->param();
@@ -1663,44 +1701,57 @@ int great::t_gpvtflt::_amb_resolution()
         }
 
         // getting the reference satellite
+        bool ambiguity_ready = true;
         bool isSetRefSat = dynamic_cast<t_gsetamb *>(_set)->isSetRefSat();
         if (isSetRefSat && !_isBase)
         { //ppp mode
             bool ref_valid = _getSatRef();
             if (!ref_valid)
-                return 0;
+            {
+                // A missing reference blocks fixing only; the float position is valid.
+                ambiguity_ready = false;
+                _ambfix->clear_ratio();
+            }
         }
         if (!isSetRefSat)
             _sat_ref.clear();
-        _ambfix->setSatRef(_sat_ref);
+        if (ambiguity_ready)
+            _ambfix->setSatRef(_sat_ref);
 
-        if ((_observ == gnut::OBSCOMBIN::RAW_ALL || _observ == gnut::OBSCOMBIN::RAW_MIX) && _frequency >= 3)
+        if (ambiguity_ready &&
+            (_observ == gnut::OBSCOMBIN::RAW_ALL || _observ == gnut::OBSCOMBIN::RAW_MIX) && _frequency >= 3)
         {
-            _ambfix->processBatch(_epoch, _filter, "EWL");
+            timed_process_batch(0, "EWL");
         }
-        if ((_observ == gnut::OBSCOMBIN::RAW_ALL || _observ == gnut::OBSCOMBIN::RAW_MIX) && _frequency >= 4)
+        if (ambiguity_ready &&
+            (_observ == gnut::OBSCOMBIN::RAW_ALL || _observ == gnut::OBSCOMBIN::RAW_MIX) && _frequency >= 4)
         {
-            _ambfix->processBatch(_epoch, _filter, "EWL24");
+            timed_process_batch(1, "EWL24");
         }
-        if ((_observ == gnut::OBSCOMBIN::RAW_ALL || _observ == gnut::OBSCOMBIN::RAW_MIX) && _frequency >= 5)
+        if (ambiguity_ready &&
+            (_observ == gnut::OBSCOMBIN::RAW_ALL || _observ == gnut::OBSCOMBIN::RAW_MIX) && _frequency >= 5)
         {
-            _ambfix->processBatch(_epoch, _filter, "EWL25");
+            timed_process_batch(2, "EWL25");
         }
-        if (_observ == OBSCOMBIN::RAW_ALL || (_observ == OBSCOMBIN::RAW_MIX  && _frequency >= 2))
+        if (ambiguity_ready &&
+            (_observ == OBSCOMBIN::RAW_ALL || (_observ == OBSCOMBIN::RAW_MIX && _frequency >= 2)))
         {
-            _ambfix->processBatch(_epoch, _filter, "WL");
+            timed_process_batch(3, "WL");
         }
 
 
-        int nlfix_valid = _ambfix->processBatch(_epoch, _filter, "NL");
-        if (nlfix_valid < 0)
+        if (ambiguity_ready)
         {
-            _amb_state = false;
-            if (_spdlog)
-                SPDLOG_LOGGER_INFO(_spdlog, _site + _epoch.str_ymdhms(" epoch ") + ": fix ambiguity failed !");
+            int nlfix_valid = timed_process_batch(4, "NL");
+            if (nlfix_valid < 0)
+            {
+                _amb_state = false;
+                if (_spdlog)
+                    SPDLOG_LOGGER_INFO(_spdlog, _site + _epoch.str_ymdhms(" epoch ") + ": fix ambiguity failed !");
+            }
+            else
+                _amb_state = _ambfix->amb_fixed();
         }
-        else
-            _amb_state = _ambfix->amb_fixed();
     }
 
     // output the fixed result
@@ -3063,8 +3114,8 @@ void great::t_gpvtflt::_prtOut(t_gtime &epoch, t_gallpar &X, const SymmetricMatr
     }
 
 
-    os << fixed << setprecision(4) << " "
-       << " " << epoch.sow() + epoch.dsec();
+    os << fixed << setprecision(4)
+       << " " << setw(15) << epoch.sow() + epoch.dsec();
     if (_crd_est != CONSTRPAR::FIX)
     {
         os << fixed << setprecision(4)
@@ -3090,7 +3141,7 @@ void great::t_gpvtflt::_prtOut(t_gtime &epoch, t_gallpar &X, const SymmetricMatr
        << " " << setw(5) << pdop // pdop
        << fixed << setprecision(2)
        << " " << setw(8) << _sig_unit // m0
-       << " " << setw(8) << amb;
+       << " " << setw(10) << amb;
     if (_fix_mode != FIX_MODE::NO)
         os << setprecision(2) << " " << fixed << setw(10) << _ambfix->get_ratio();
     if (_isBase)
@@ -3112,6 +3163,53 @@ void great::t_gpvtflt::_prtOutHeader()
 {
     ostringstream os;
 
+    // descriptive file header
+    os << "#LEAST SQUARES FILTER BASED GNSS SOLUTION" << endl;
+    auto *gen_setting = dynamic_cast<t_gsetgen *>(_set);
+    auto *gnss_setting = dynamic_cast<t_gsetgnss *>(_set);
+    auto *amb_setting = dynamic_cast<t_gsetamb *>(_set);
+    os << "# Processing: estimator=FLT positioning="
+       << (_isBase ? "PPK" : "PPP")
+       << " observation=" << observation_model_name(_observ)
+       << " frequency=" << _frequency << endl;
+    os << "# Time: begin=" << gen_setting->beg().str_ymdhms()
+       << " end=" << gen_setting->end().str_ymdhms()
+       << " interval=" << gen_setting->sampling() << " s" << endl;
+    os << "# Products: precise_boundary_extrapolation="
+       << MAX_PRECISE_EXTRAPOLATION << " s" << endl;
+    os << "# Ambiguity: fix=" << amb_setting->fixmode2str(_fix_mode)
+       << " bias=" << (_upd_mode == UPD_MODE::OSB ? "OSB" : "UPD")
+       << " partial=" << (amb_setting->part_ambfix() ? "YES" : "NO");
+    if (amb_setting->part_ambfix())
+        os << " min_equations=" << amb_setting->part_ambfix_num();
+    os << endl;
+    const set<string> sys = gen_setting->sys();
+    os << "# GNSS systems: ";
+    for (auto it = sys.begin(); it != sys.end(); it++)
+        os << *it << " ";
+    os << endl;
+    for (const string &system_name : sys)
+    {
+        const GSYS system = t_gsys::str2gsys(system_name);
+        const map<FREQ_SEQ, GOBSBAND> frequency_bands =
+            gnss_setting->band_index(system);
+        os << "# Signals " << system_name << ":";
+        for (const auto &frequency_band : frequency_bands)
+        {
+            os << " F"
+               << gfreqseq2str(frequency_band.first) << "=B"
+               << gobsband2str(frequency_band.second);
+        }
+        os << endl;
+    }
+    os << "# Output: marker ECEF XYZ [m]; RMS is from the current filter covariance; "
+          "AmbStatus is the accepted ambiguity state";
+    if (_fix_mode != FIX_MODE::NO)
+        os << "; Ratio is the AR acceptance ratio";
+    if (_isBase)
+        os << "; BL is the baseline length";
+    os << "; Quality is the solution quality grade" << endl;
+
     if (_isBase)
     {
         auto beg = dynamic_cast<t_gsetgen *>(_set)->beg();
@@ -3128,7 +3226,7 @@ void great::t_gpvtflt::_prtOutHeader()
     os << "#" << setw(15) << "Seconds of Week";
     if (_crd_est != CONSTRPAR::FIX)
     {
-        os << " " << setw(12) << "X-ECEF " << // [m]
+        os << " " << setw(15) << "X-ECEF" << // [m]
             " " << setw(15) << "Y-ECEF" <<      // [m]
             " " << setw(15) << "Z-ECEF" <<      // [m]
             " " << setw(10) << "Vx-ECEF" <<      // [m/s]
@@ -3156,7 +3254,7 @@ void great::t_gpvtflt::_prtOutHeader()
     os << "#" << setw(15) << "(s)";
     if (_crd_est != CONSTRPAR::FIX)
     {
-        os << " " << setw(12) << "(m)" << // [m]
+        os << " " << setw(15) << "(m)" << // [m]
             " " << setw(15) << "(m)" <<      // [m]
             " " << setw(15) << "(m)" <<      // [m]
             " " << setw(10) << "(m/s)" << // [m/s]
@@ -3175,10 +3273,10 @@ void great::t_gpvtflt::_prtOutHeader()
        << " " << setw(8) << "(m)"
        << " " << setw(10) << " ";
     if (_fix_mode != FIX_MODE::NO)
-        os << setw(10) << " "; 
+        os << " " << setw(10) << " ";
     if (_isBase)
         os << " " << setw(10) << "(m)"; 
-    os << setw(8) << " ";
+    os << " " << setw(8) << " ";
     os << endl;
 
     // Print the fixed-solution header through the virtual output hook, so

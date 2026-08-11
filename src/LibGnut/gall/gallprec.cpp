@@ -607,26 +607,44 @@ namespace gnut
         _CT.clear();
         _C.clear();
 
-        if (_mapsp3.find(sat) == _mapsp3.end())
+        if (_mapsp3.find(sat) == _mapsp3.end() || _mapsp3[sat].empty())
             return -1;
 
-        map<t_gtime, t_map_dat>::iterator itReq = _mapsp3[sat].lower_bound(t); // 1st equal|greater [than t]
+        map<t_gtime, t_map_dat>::iterator itBeg = _mapsp3[sat].begin();
+        map<t_gtime, t_map_dat>::iterator itEnd = _mapsp3[sat].end();
+        auto itLast = itEnd;
+        --itLast;
 
-        if (itReq == _mapsp3[sat].end())
-            return -1;
-
-        map<t_gtime, t_map_dat>::iterator itReq_tmp = --(_mapsp3[sat].lower_bound(t));
-
-        if (itReq_tmp != std::end(_mapsp3[sat]))
+        t_gtime query(t);
+        if (t < itBeg->first)
         {
+            if (itBeg->first.diff(t) > MAX_PRECISE_EXTRAPOLATION)
+                return -1;
+            query = itBeg->first;
+        }
+        else if (t > itLast->first)
+        {
+            if (t.diff(itLast->first) > MAX_PRECISE_EXTRAPOLATION)
+                return -1;
+            query = itLast->first;
+        }
+
+        map<t_gtime, t_map_dat>::iterator itReq = _mapsp3[sat].lower_bound(query);
+        if (itReq == itEnd)
+            itReq = itLast;
+
+        // Compare with the preceding sample only when it exists; decrementing
+        // begin() at the leading product boundary is undefined.
+        if (itReq != itBeg)
+        {
+            auto itReq_tmp = itReq;
+            --itReq_tmp;
             if (abs(t.diff(itReq_tmp->first)) < abs(t.diff(itReq->first)))
                 itReq = itReq_tmp;
         }
 
         _ref = itReq->first; // get the nearest epoch after t as reference
 
-        map<t_gtime, t_map_dat>::iterator itBeg = _mapsp3[sat].begin();
-        map<t_gtime, t_map_dat>::iterator itEnd = _mapsp3[sat].end();
         map<t_gtime, t_map_dat>::iterator it = itReq;
 
         if (itReq == itEnd)
@@ -716,16 +734,29 @@ namespace gnut
         _C.clear();
         _IFCB_F3.clear();
 
-        if (_mapclk.find(sat) == _mapclk.end())
+        if (_mapclk.find(sat) == _mapclk.end() || _mapclk[sat].empty())
             return -1;
         map<t_gtime, t_map_dat>::iterator itBeg = _mapclk[sat].begin();
         map<t_gtime, t_map_dat>::iterator itEnd = _mapclk[sat].end();
-        map<t_gtime, t_map_dat>::iterator itReq = _mapclk[sat].lower_bound(t); // 1st equal|greater [than t]
-
-        if (itReq == _mapclk[sat].end())
-            return -1; // too old products
+        auto itLast = itEnd;
+        --itLast;
+        map<t_gtime, t_map_dat>::iterator itReq;
         if (t < itBeg->first)
-            return -1; // too new products
+        {
+            if (itBeg->first.diff(t) > MAX_PRECISE_EXTRAPOLATION)
+                return -1;
+            itReq = itBeg;
+        }
+        else if (t > itLast->first)
+        {
+            if (t.diff(itLast->first) > MAX_PRECISE_EXTRAPOLATION)
+                return -1;
+            itReq = itLast;
+        }
+        else
+        {
+            itReq = _mapclk[sat].lower_bound(t); // first equal or later sample
+        }
 
         _clkref = itReq->first; // get the nearest epoch after t as reference
 
@@ -741,30 +772,11 @@ namespace gnut
 
         int limit = static_cast<int>(degree_clk / 2); // round (floor)
 
-        bool flag_left = false;
-        auto itleft = itReq;
-        for (int i = 0; i <= limit; i++)
-        {
-            itleft--;
-            if (itleft == _mapclk[sat].end())
-            {
-                flag_left = true;
-                break;
-            }
-        }
-        bool flag_right = false;
-        auto itright = itReq;
-        for (int i = 0; i < static_cast<int>(degree_clk - limit); i++)
-        {
-            itright++;
-            if (itright == _mapclk[sat].end())
-            {
-                flag_right = true;
-                break;
-            }
-        }
+        const bool flag_left = distance(itBeg, itReq) <= limit;
+        const bool flag_right =
+            distance(itReq, itEnd) <= static_cast<int>(degree_clk - limit);
 
-        if (_mapclk[sat].size() < static_cast<unsigned int>(degree_clk))
+        if (_mapclk[sat].size() < degree_clk + 1)
         {
             return -1;
         }

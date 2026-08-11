@@ -26,6 +26,10 @@
 #define UNDEFVAL_POS 0.000
 
 #define MAXDIFF_CLK 300.0
+
+// Limit precise-product extrapolation to short boundary gaps such as signal
+// transmission immediately before a day-boundary product epoch.
+constexpr double MAX_PRECISE_EXTRAPOLATION = 1.0;
 #define MAXDIFF_EPH 900.0
 
 using namespace std;

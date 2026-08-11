@@ -291,6 +291,9 @@ namespace gfgomsf
 		int _obs_level = 3;
 		t_gtriple _gcrd_base;
 		t_gprecisebiasFGO *_gbias_model = nullptr;					                    ///< baise model
+		// RAW preparation models own independent geometry/windup scratch. A
+		// satellite stays in one fixed state shard to preserve chronology.
+		mutable vector<unique_ptr<t_gprecisebiasFGO>> _raw_prepare_models;
 		GNSSInfo *_last_gnss_info = nullptr;                             ///save gnss equ
 		GNSSInfo *_last_gnss_marginalization_info = nullptr;             ///for gnss marginalization
 		vector<double *> _last_gnss_marginalization_para_blocks;
@@ -414,8 +417,8 @@ namespace gfgomsf
 		 *
 		 * Uses SPARSE_NORMAL_CHOLESKY when a sparse backend is available
 		 * (falling back to DENSE_QR). Non-RAW graphs honor the configured thread
-		 * count; RAW is pinned to one worker while its observation model shares
-		 * mutable scratch state.
+		 * count. RAW preparation uses state-sharded precise-model scratch and the
+		 * solve consumes immutable linearized factors.
 		 */
 		ceres::Solver::Options _ceres_solver_options() const;
 		static int _raw_ifb_slot(GSYS system, FREQ_SEQ frequency);
@@ -534,6 +537,19 @@ namespace gfgomsf
 			FgoPhaseStat prep;         // data preparation / observation combination
 			FgoPhaseStat opt;          // ceres optimization
 			FgoPhaseStat amb;          // ambiguity resolution
+			FgoPhaseStat amb_ewl;
+			FgoPhaseStat amb_ewl24;
+			FgoPhaseStat amb_ewl25;
+			FgoPhaseStat amb_wl;
+			FgoPhaseStat amb_nl;
+			FgoPhaseStat amb_setup;
+			FgoPhaseStat amb_dependence;
+			FgoPhaseStat amb_define_dd;
+			FgoPhaseStat amb_combination;
+			FgoPhaseStat amb_correction;
+			FgoPhaseStat amb_selection;
+			FgoPhaseStat amb_lambda;
+			FgoPhaseStat amb_feedback;
 			FgoPhaseStat marg;         // marginalization
 			FgoPhaseStat slide;        // window slide
 			// RAW optimization detail. Counts may exceed windows when outlier

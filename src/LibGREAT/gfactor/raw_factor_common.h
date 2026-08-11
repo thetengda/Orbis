@@ -60,6 +60,32 @@ namespace raw_factor_detail
         virtual bool prepare(const std::vector<double *> &blocks) = 0;
     };
 
+    inline t_gprecisebiasFGO *&rawPreparationModelOverride()
+    {
+        // The override exists only while one worker prepares a factor. Ceres
+        // later reads the frozen linearization without touching this model.
+        static thread_local t_gprecisebiasFGO *model = nullptr;
+        return model;
+    }
+
+    class RawPreparationModelScope
+    {
+    public:
+        explicit RawPreparationModelScope(t_gprecisebiasFGO *model)
+            : _previous(rawPreparationModelOverride())
+        {
+            rawPreparationModelOverride() = model;
+        }
+
+        ~RawPreparationModelScope()
+        {
+            rawPreparationModelOverride() = _previous;
+        }
+
+    private:
+        t_gprecisebiasFGO *_previous;
+    };
+
     inline par_type isbType(GSYS system)
     {
         switch (system)
@@ -262,6 +288,8 @@ namespace raw_factor_detail
                                 RawEvaluationCache &cache,
                                 RawLinearization &out)
     {
+        if (rawPreparationModelOverride())
+            bias_model = rawPreparationModelOverride();
         const std::array<double, 9> state{{crd[0], crd[1], crd[2], clk, trp,
                                            sion, use_isb ? isb : 0.0,
                                            use_ifb ? ifb : 0.0,

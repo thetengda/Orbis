@@ -8,3 +8,8 @@ sample_data/
 doc/**.md
 
 vcpkg_installed/
+
+.vscode/
+.claude/
+.venv/
+doc/

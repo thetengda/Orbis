@@ -32,6 +32,18 @@ using namespace gnut;
 
 namespace great
 {
+	/** DEBUG profiling for one ambiguity mode; values are wall milliseconds. */
+	struct AmbiguityBatchTiming
+	{
+		double setup = 0.0;
+		double dependence = 0.0;
+		double define_dd = 0.0;
+		double combination = 0.0;
+		double correction = 0.0;
+		double selection = 0.0;
+		double lambda = 0.0;
+		double feedback = 0.0;
+	};
     /**
      * Absolute two-parameter ambiguity equation accepted by the integer
      * resolver. Parameter indices are 1-based and valid for the filter state
@@ -285,6 +297,13 @@ namespace great
         /** @brief get ratio. */
         double get_ratio() { return _outRatio; };
 
+        /** Clear the reported ratio when no fixing attempt was performed. */
+        void clear_ratio() noexcept { _outRatio = 0.0; }
+		const AmbiguityBatchTiming &lastBatchTiming() const noexcept
+		{
+			return _last_batch_timing;
+		}
+
         /**
         * @brief set ratio threshold and lambda reduction and search
         */
@@ -396,7 +415,8 @@ namespace great
         int _pdE_rows = 0;
         int _pdE_columns = 0;
         int _pdE_max_independent = 0;
-        double _outRatio;                      ///< outRatio
+        double _outRatio = 0.0;                ///< outRatio
+		AmbiguityBatchTiming _last_batch_timing;
         
         map<string, double> _map_EWL_decision; ///< deriation, sigma in WL/NL-cycle
         map<string, double> _map_WL_decision;  ///< deriation, sigma in WL/NL-cycle

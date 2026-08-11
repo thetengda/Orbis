@@ -21,16 +21,6 @@
 
 #include "gexport/ExportLibGnut.h"
 
-#if defined _WIN32 || defined _WIN64
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
-
-#ifdef USE_OPENMP
-#include <omp.h>
-#endif
-
 #include <thread>
 #include <mutex>
 
@@ -58,15 +48,15 @@ namespace gnut
         /** @brief unlock. */
         void unlock();
 
+        // Retained for source compatibility only. The old value was racy and
+        // must not be used to decide whether another thread may enter.
         bool isLock = false;
 
     protected:
-#ifdef USE_OPENMP
-        omp_lock_t _mutex;
-#else
-        mutex _mutex;
-
-#endif 
+        // Several legacy call paths re-enter the same data-object lock. A
+        // recursive mutex preserves that behavior while still blocking other
+        // threads; the former shared bool bypass was not mutual exclusion.
+        std::recursive_mutex _mutex;
     };
 } // namespace
 

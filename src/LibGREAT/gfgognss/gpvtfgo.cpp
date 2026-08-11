@@ -14,11 +14,13 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <thread>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <queue>
 #include <stdexcept>
+#include "gdata/gephprec.h"
 #include "gmodels/gprecisebiasGPP.h"
 #include "gfactor/fixed_ambiguity_factor.h"
 #include "gfactor/ginitial_pose_factor.h"
@@ -91,11 +93,16 @@ namespace
 	}
 
 	bool prepare_raw_factor(ceres::CostFunction *cost,
-		const std::vector<double *> &blocks)
+		const std::vector<double *> &blocks,
+		gfgo::t_gprecisebiasFGO *preparation_model = nullptr)
 	{
 		auto *preparable =
 			dynamic_cast<gfgo::raw_factor_detail::RawPreparableFactor *>(cost);
-		return preparable && preparable->prepare(blocks);
+		if (!preparable)
+			return false;
+		gfgo::raw_factor_detail::RawPreparationModelScope model_scope(
+			preparation_model);
+		return preparable->prepare(blocks);
 	}
 
 	bool feedback_solve_converged(const ceres::Solver::Summary &summary)
@@ -268,10 +275,13 @@ t_gfgo_para(gset) {
 
 		_output_float_solution << "# Processing: estimator=FGO positioning="
 			<< (_isBase ? "PPK" : "PPP")
-			<< " observation=" << observation_model_name(_observ) << endl;
+			<< " observation=" << observation_model_name(_observ)
+			<< " frequency=" << _frequency << endl;
 		_output_float_solution << "# Time: begin=" << gen_setting->beg().str_ymdhms()
 			<< " end=" << gen_setting->end().str_ymdhms()
 			<< " interval=" << gen_setting->sampling() << " s" << endl;
+		_output_float_solution << "# Products: precise_boundary_extrapolation="
+			<< MAX_PRECISE_EXTRAPOLATION << " s" << endl;
 		_output_float_solution << "# Graph: window_length=" << gwindow_size
 			<< " solver_threads=" << effective_threads;
 		if (effective_threads != requested_threads)
@@ -307,7 +317,10 @@ t_gfgo_para(gset) {
 		}
 		_output_float_solution
 			<< "# Output: marker ECEF XYZ [m]; RMS is from the current Ceres posterior; "
-				"AmbStatus is the accepted graph state" << endl;
+				"AmbStatus is the accepted graph state";
+		if (_fix_mode != FIX_MODE::NO)
+			_output_float_solution << "; Ratio is the AR acceptance ratio";
+		_output_float_solution << endl;
 		if (_isBase)
 		{
 			t_gtriple xyz_base = _gallobj->obj(_site_base)->crd_arp(_epoch);
@@ -315,41 +328,45 @@ t_gfgo_para(gset) {
 			_output_float_solution << endl;
 		}
 		_output_float_solution << "#" << setw(15) << "Seconds of Week"
-			<< setw(12) << "X-ECEF " << // [m]
-			" " << setw(15) << "Y-ECEF" <<      // [m]
-			" " << setw(15) << "Z-ECEF" <<      // [m]
-			" " << setw(10) << "Vx-ECEF" <<      // [m/s]
-			" " << setw(10) << "Vy-ECEF" <<      // [m/s]
-			" " << setw(10) << "Vz-ECEF" <<      // [m/s]
-			" " << setw(9) << "X-RMS"
+			<< " " << setw(14) << "X-ECEF"  // [m]
+			<< " " << setw(14) << "Y-ECEF"  // [m]
+			<< " " << setw(14) << "Z-ECEF"  // [m]
+			<< " " << setw(9) << "Vx-ECEF"  // [m/s]
+			<< " " << setw(9) << "Vy-ECEF"  // [m/s]
+			<< " " << setw(9) << "Vz-ECEF"  // [m/s]
+			<< " " << setw(9) << "X-RMS"
 			<< " " << setw(9) << "Y-RMS"
 			<< " " << setw(9) << "Z-RMS"
 			<< " " << setw(9) << "Vx-RMS"
 			<< " " << setw(9) << "Vy-RMS"
-			<< " " << setw(9) << "Vz-RMS" <<
-			" " << setw(5) << "NSat"
+			<< " " << setw(9) << "Vz-RMS"
+			<< " " << setw(5) << "NSat"
 			<< " " << setw(5) << "PDOP"
 			<< " " << setw(8) << "sigma0"
 			<< " " << setw(10) << "AmbStatus";
+		if (_fix_mode != FIX_MODE::NO)
+			_output_float_solution << " " << setw(10) << "Ratio";
 
 		_output_float_solution << endl;
-		_output_float_solution << "#" << setw(15) << "(s)" <<
-			" " << setw(12) << "(m)" << // [m]
-			" " << setw(15) << "(m)" <<      // [m]
-			" " << setw(15) << "(m)" <<      // [m]
-			" " << setw(10) << "(m/s)" << // [m/s]
-			" " << setw(10) << "(m/s)" << // [m/s]
-			" " << setw(10) << "(m/s)" << // [m/s]
-			" " << setw(9) << "(m)" <<      // [m]
-			" " << setw(9) << "(m)" <<      // [m]
-			" " << setw(9) << "(m)" <<
-			" " << setw(9) << "(m/s)" <<  // [m/s]
-			" " << setw(9) << "(m/s)" <<  // [m/s]
-			" " << setw(9) << "(m/s)" <<      // [m/s]
-			" " << setw(5) << "(#)" <<
-			" " << setw(5) << "(#)" <<
-			" " << setw(8) << "(m)" <<
-			" " << setw(10) << " ";
+		_output_float_solution << "#" << setw(15) << "(s)"
+			<< " " << setw(14) << "(m)"  // [m]
+			<< " " << setw(14) << "(m)"  // [m]
+			<< " " << setw(14) << "(m)"  // [m]
+			<< " " << setw(9) << "(m/s)"  // [m/s]
+			<< " " << setw(9) << "(m/s)"  // [m/s]
+			<< " " << setw(9) << "(m/s)"  // [m/s]
+			<< " " << setw(9) << "(m)"  // [m]
+			<< " " << setw(9) << "(m)"  // [m]
+			<< " " << setw(9) << "(m)"
+			<< " " << setw(9) << "(m/s)"  // [m/s]
+			<< " " << setw(9) << "(m/s)"  // [m/s]
+			<< " " << setw(9) << "(m/s)"  // [m/s]
+			<< " " << setw(5) << "(#)"
+			<< " " << setw(5) << "(#)"
+			<< " " << setw(8) << "(m)"
+			<< " " << setw(10) << " ";
+		if (_fix_mode != FIX_MODE::NO)
+			_output_float_solution << " " << setw(10) << " ";
 
 		_output_float_solution << endl;
 	}
@@ -399,6 +416,19 @@ void gfgomsf::t_gpvtfgo::_print_fgo_prof() const
 		{"prep", &_fgo_prof.prep},
 		{"optimize", &_fgo_prof.opt},
 		{"amb", &_fgo_prof.amb},
+		{"  amb.ewl", &_fgo_prof.amb_ewl},
+		{"  amb.ewl24", &_fgo_prof.amb_ewl24},
+		{"  amb.ewl25", &_fgo_prof.amb_ewl25},
+		{"  amb.wl", &_fgo_prof.amb_wl},
+		{"  amb.nl", &_fgo_prof.amb_nl},
+		{"  amb.setup", &_fgo_prof.amb_setup},
+		{"  amb.depend", &_fgo_prof.amb_dependence},
+		{"  amb.define", &_fgo_prof.amb_define_dd},
+		{"  amb.combine", &_fgo_prof.amb_combination},
+		{"  amb.correct", &_fgo_prof.amb_correction},
+		{"  amb.select", &_fgo_prof.amb_selection},
+		{"  amb.lambda", &_fgo_prof.amb_lambda},
+		{"  amb.feedback", &_fgo_prof.amb_feedback},
 		{"marginalize", &_fgo_prof.marg},
 		{"slide", &_fgo_prof.slide},
 		{"raw.graph", &_fgo_prof.raw_graph},
@@ -678,6 +708,8 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 
 
 	// ambiguity resolution
+	_last_ambiguity_mode_ms.fill(0.0);
+	_last_ambiguity_stage_ms.fill(0.0);
 
 
 	if (_last_gnss_info->valid)
@@ -798,6 +830,19 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 	_fgo_prof.prep.add(_prep_ms);
 	_fgo_prof.opt.add(_opt_ms);
 	_fgo_prof.amb.add(_amb_ms);
+	_fgo_prof.amb_ewl.add(_last_ambiguity_mode_ms[0]);
+	_fgo_prof.amb_ewl24.add(_last_ambiguity_mode_ms[1]);
+	_fgo_prof.amb_ewl25.add(_last_ambiguity_mode_ms[2]);
+	_fgo_prof.amb_wl.add(_last_ambiguity_mode_ms[3]);
+	_fgo_prof.amb_nl.add(_last_ambiguity_mode_ms[4]);
+	_fgo_prof.amb_setup.add(_last_ambiguity_stage_ms[0]);
+	_fgo_prof.amb_dependence.add(_last_ambiguity_stage_ms[1]);
+	_fgo_prof.amb_define_dd.add(_last_ambiguity_stage_ms[2]);
+	_fgo_prof.amb_combination.add(_last_ambiguity_stage_ms[3]);
+	_fgo_prof.amb_correction.add(_last_ambiguity_stage_ms[4]);
+	_fgo_prof.amb_selection.add(_last_ambiguity_stage_ms[5]);
+	_fgo_prof.amb_lambda.add(_last_ambiguity_stage_ms[6]);
+	_fgo_prof.amb_feedback.add(_last_ambiguity_stage_ms[7]);
 	_fgo_prof.marg.add(_marg_ms);
 	_fgo_prof.slide.add(_slide_ms);
 
@@ -1066,31 +1111,29 @@ void gfgomsf::t_gpvtfgo::publish_foat()
         bl = tmpneu.norm();
     }
 
-    _output_float_solution << fixed << setprecision(4) << " "
-        // << epoch.str_ymdhms() << str_dsec.substr(2) << setprecision(4)
-        << " " << _epoch.sow() + _epoch.dsec()
-        << fixed << setprecision(4)
-        << " " << setw(10) << xyz_ecc[0] // [m]
-        << " " << setw(10) << xyz_ecc[1] // [m]
-        << " " << setw(10) << xyz_ecc[2] // [m]
-        << " " << setw(10) << vRec[0]    // [m/s]
-        << " " << setw(10) << vRec[1]    // [m/s]
-        << " " << setw(10) << vRec[2]    // [m/s]
-        << " " << setw(10) << Xrms       // [m]
-        << " " << setw(10) << Yrms       // [m]
-        << " " << setw(10) << Zrms       // [m]
-        << " " << setw(10) << Vxrms      // [m/s]
-        << " " << setw(10) << Vyrms      // [m/s]
-        << " " << setw(10) << Vzrms      // [m/s]
+    _output_float_solution << fixed << setprecision(4)
+        << " " << setw(15) << _epoch.sow() + _epoch.dsec()
+        << " " << setw(14) << xyz_ecc[0] // [m]
+        << " " << setw(14) << xyz_ecc[1] // [m]
+        << " " << setw(14) << xyz_ecc[2] // [m]
+        << " " << setw(9) << vRec[0]    // [m/s]
+        << " " << setw(9) << vRec[1]    // [m/s]
+        << " " << setw(9) << vRec[2]    // [m/s]
+        << " " << setw(9) << Xrms       // [m]
+        << " " << setw(9) << Yrms       // [m]
+        << " " << setw(9) << Zrms       // [m]
+        << " " << setw(9) << Vxrms      // [m/s]
+        << " " << setw(9) << Vyrms      // [m/s]
+        << " " << setw(9) << Vzrms      // [m/s]
         << fixed << setprecision(0)
         << " " << setw(5) << nsat // nsat
         << fixed << setprecision(2)
         << " " << setw(5) << pdop // pdop
-        << fixed << setprecision(2)
-        << " " << setw(5) << _last_gnss_info->sig_unit // pdop
-        << fixed << setprecision(2)
-        << " " << setw(8) << amb
-        << endl;
+        << " " << setw(8) << _last_gnss_info->sig_unit // sigma0
+        << " " << setw(10) << amb;
+    if (_fix_mode != FIX_MODE::NO && _ambfix)
+        _output_float_solution << " " << fixed << setw(10) << _ambfix->get_ratio();
+    _output_float_solution << endl;
 }
 
 void gfgomsf::t_gpvtfgo::_output_amb_fixed(const std::string &content)
@@ -3075,15 +3118,14 @@ ceres::Solver::Options gfgomsf::t_gpvtfgo::_ceres_solver_options() const
     //         SPDLOG_LOGGER_WARN(_spdlog,
     //             "No sparse linear algebra library in this Ceres build; the GNSS FGO graph will fall back to DENSE_QR");
     // }
-    // RAW factors are prepared serially before Solve; their immutable linear
-    // models can therefore be evaluated safely by Ceres worker threads.
+    // RAW preparation and the frozen Ceres solve use the same worker limit.
     const int requested_threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
     options.num_threads = requested_threads;
     if (_observ == OBSCOMBIN::RAW_ALL && requested_threads > 1 &&
         !_raw_thread_warning_logged && _spdlog)
     {
         _spdlog->info(
-            "PPP RAW FGO uses {} Ceres workers with serially prepared immutable observation factors",
+            "PPP RAW FGO uses {} workers for satellite-partitioned model preparation and the immutable Ceres solve",
             requested_threads);
         _raw_thread_warning_logged = true;
     }
@@ -3114,8 +3156,24 @@ bool gfgomsf::t_gpvtfgo::_solve_PPP_RAW_problem(
 	{
 		if (prepared_raw)
 		{
-			// Prepare in time/satellite order so phase-windup history remains
-			// deterministic; the following Ceres evaluation is read-only.
+			// Keep each satellite on one persistent state shard. Its windup history is
+			// chronological, while different shards may prepare in parallel.
+			const int requested_threads = _gnss_num_threads > 0 ? _gnss_num_threads : 1;
+			// Keep model-state partitioning independent of the requested thread
+			// count, otherwise changing threads also changes legacy model caches.
+			const size_t preparation_shards = 4U;
+			const size_t execution_threads = (std::min)(
+				preparation_shards, static_cast<size_t>(requested_threads));
+			while (_raw_prepare_models.size() < preparation_shards)
+				_raw_prepare_models.emplace_back(new t_gprecisebiasFGO(
+					_allproc, _spdlog, _set));
+
+			struct RawPreparationTask
+			{
+				const RAWEquMsg *message = nullptr;
+				const RawProblemFactor *factor = nullptr;
+			};
+			std::vector<std::vector<RawPreparationTask>> shard_tasks(preparation_shards);
 			for (int node = 0; node <= _rover_count; ++node)
 			{
 				std::vector<const RAWEquMsg *> ordered_messages;
@@ -3131,17 +3189,66 @@ bool gfgomsf::t_gpvtfgo::_solve_PPP_RAW_problem(
 				for (const RAWEquMsg *message : ordered_messages)
 				{
 					const auto factor = _raw_problem_factors.find(message);
-					if (factor == _raw_problem_factors.end() ||
-						!prepare_raw_factor(factor->second.cost,
-							factor->second.blocks))
-					{
-						if (_spdlog)
-							_spdlog->error(
-								"Failed to prepare RAW factor {} {} at {}",
-								message->site, message->sat_id,
-								message->time.str_ymdhms("", false));
+					if (factor == _raw_problem_factors.end())
 						return false;
+					// A stable text checksum keeps the same receiver/satellite on one
+					// shard even when ambiguity arc identifiers change.
+					size_t satellite_key = 0;
+					const string identity = message->site + ":" + message->sat_id;
+					for (unsigned char character : identity)
+						satellite_key = satellite_key * 131U + character;
+					shard_tasks[satellite_key % preparation_shards].push_back(
+						{message, &factor->second});
+				}
+			}
+
+			std::vector<unsigned char> shard_ok(preparation_shards, 1U);
+			std::vector<const RAWEquMsg *> failed_message(preparation_shards, nullptr);
+			auto prepare_shard = [&](size_t shard)
+			{
+				for (const auto &task : shard_tasks[shard])
+				{
+					if (!prepare_raw_factor(task.factor->cost, task.factor->blocks,
+						_raw_prepare_models[shard].get()))
+					{
+						shard_ok[shard] = 0U;
+						failed_message[shard] = task.message;
+						break;
 					}
+				}
+			};
+			if (execution_threads == 1U)
+			{
+				for (size_t shard = 0; shard < preparation_shards; ++shard)
+					prepare_shard(shard);
+			}
+			else
+			{
+				std::vector<std::thread> workers;
+				workers.reserve(execution_threads);
+				for (size_t worker = 0; worker < execution_threads; ++worker)
+				{
+					workers.emplace_back([&, worker]()
+					{
+						for (size_t shard = worker; shard < preparation_shards;
+							 shard += execution_threads)
+							prepare_shard(shard);
+					});
+				}
+				for (auto &worker : workers)
+					worker.join();
+			}
+			for (size_t shard = 0; shard < preparation_shards; ++shard)
+			{
+				if (!shard_ok[shard])
+				{
+					const RAWEquMsg *message = failed_message[shard];
+					if (_spdlog && message)
+						_spdlog->error(
+							"Failed to prepare RAW factor {} {} at {}",
+							message->site, message->sat_id,
+							message->time.str_ymdhms("", false));
+					return false;
 				}
 			}
 		}

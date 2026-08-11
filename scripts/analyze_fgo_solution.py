@@ -288,8 +288,8 @@ def continuity_metrics(
         elif abs(delta - interval) > 1e-6:
             gap_intervals.append({"after_sow": previous.sow, "before_sow": current.sow, "delta_s": delta})
     nominal_end = nominal_start + hours * 3600.0
-    expected_rows = max(0, int(round(hours * 3600.0 / interval)) - 1)
-    expected_epochs = [nominal_start + interval * index for index in range(1, expected_rows + 1)]
+    expected_rows = max(0, int(round(hours * 3600.0 / interval)))
+    expected_epochs = [nominal_start + interval * index for index in range(expected_rows)]
     observed_epoch_keys = {round(row.sow, 6) for row in rows}
     missing_epochs = [
         sow for sow in expected_epochs if round(sow, 6) not in observed_epoch_keys

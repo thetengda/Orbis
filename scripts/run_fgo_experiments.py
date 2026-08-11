@@ -102,9 +102,11 @@ class Experiment:
 
     @property
     def expected_rows(self) -> int:
-        # GREAT emits the first graph solution one interval after <beg> and the
-        # last one at <end> for the repository's standard configurations.
-        return max(0, int(round((self.end - self.begin).total_seconds() / self.interval_s)))
+        # Configuration begin/end are inclusive processing epochs.
+        return max(
+            0,
+            int(math.floor((self.end - self.begin).total_seconds() / self.interval_s + 1e-9)) + 1,
+        )
 
     @property
     def nominal_hours(self) -> float:
@@ -455,7 +457,7 @@ def validate_output(
 
     epochs = progress.get("epochs", [])
     if epochs:
-        expected_first = gps_sow(experiment.begin) + experiment.interval_s
+        expected_first = gps_sow(experiment.begin)
         expected_last = gps_sow(experiment.end)
         if abs(epochs[0] - expected_first) > 1e-5:
             errors.append(f"{output.station}: first SOW {epochs[0]} != {expected_first}")

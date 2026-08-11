@@ -14,6 +14,7 @@
 #include "gmodels/gpar.h"
 #include <gproc/gfltmatrix.h>
 #include <cmath>
+#include <chrono>
 using namespace std;
 
 namespace great
@@ -291,6 +292,14 @@ namespace great
 
     int t_gambiguity::processBatch(const t_gtime &t, t_gflt *gflt, string mode)
     {
+		using BatchClock = std::chrono::steady_clock;
+		auto elapsed_ms = [](const BatchClock::time_point &begin)
+		{
+			return std::chrono::duration<double, std::milli>(
+				BatchClock::now() - begin).count();
+		};
+		_last_batch_timing = AmbiguityBatchTiming();
+		auto stage_begin = BatchClock::now();
         _pending_fixed_constraints.clear();
         _fixed_constraints.clear();
 
@@ -318,6 +327,7 @@ namespace great
         t_gamb_cmn amb_cmn(t, gflt);
         amb_cmn.set_mode(mode);
         _crt_time = amb_cmn.now();
+		_last_batch_timing.setup = elapsed_ms(stage_begin);
 
         int parnum = amb_cmn.param().parNumber();
 
@@ -351,10 +361,12 @@ namespace great
         // check if a new ambiguity is dependant of the already selected
         if (_is_first) 
         {
+			stage_begin = BatchClock::now();
             int maxamb;
             maxamb = _max_active_amb_one_epo + parnum;
             _is_first = _checkAmbDepend(_is_first, 0, 0, 0, 0, maxamb, maxamb);
             _is_first = false;
+			_last_batch_timing.dependence = elapsed_ms(stage_begin);
         }
 
         if (mode == "EWL")
@@ -369,12 +381,15 @@ namespace great
             _is_first_nl = _is_first;
 
         // define double difference ambiguities over one baseline (PPP sd amb.)
+		stage_begin = BatchClock::now();
         int namb = _defineDDAmb(&amb_cmn);
+		_last_batch_timing.define_dd = elapsed_ms(stage_begin);
         if (namb < 0)
             return -1;
         _total_amb_num = namb;
 
         // calulate widelane upd for iono_free
+		stage_begin = BatchClock::now();
         if (_obstype == OBSCOMBIN::RAW_ALL || _obstype == OBSCOMBIN::RAW_MIX)
         {
             if (mode != "NL" && !_calDDAmbWLALL(&amb_cmn, mode))
@@ -385,8 +400,10 @@ namespace great
             if (!_calDDAmbWL())
                 return -1;
         }
+		_last_batch_timing.combination = elapsed_ms(stage_begin);
 
         // find DD that contains reference satellite
+		stage_begin = BatchClock::now();
         if (!_sat_refs.empty() && !_findRefSD())
             return -1;
 
@@ -414,9 +431,11 @@ namespace great
             if (!_fixAmbWL(mode))
                 return -1;
         }
+		_last_batch_timing.correction = elapsed_ms(stage_begin);
         _DD_save = _DD;
 
         // select usable amb.
+		stage_begin = BatchClock::now();
         int ndef = _selectAmb(koder, namb);
         if (ndef < 0)
             return -1;
@@ -433,13 +452,32 @@ namespace great
                 itdd++;
             }
         }
+		_last_batch_timing.selection = elapsed_ms(stage_begin);
 
         // lambda search
+		stage_begin = BatchClock::now();
         if (_fix_mode != FIX_MODE::NO  /* && mode == "NL"*/)
         {
-            if (!_ambSolve(&amb_cmn, fixed_amb, mode))
+			const bool solved = _ambSolve(&amb_cmn, fixed_amb, mode);
+			_last_batch_timing.lambda = elapsed_ms(stage_begin);
+            if (!solved)
                 return -1;
         }
+		else
+		{
+			_last_batch_timing.lambda = elapsed_ms(stage_begin);
+		}
+
+		struct FeedbackStageTimer
+		{
+			BatchClock::time_point begin = BatchClock::now();
+			double &destination;
+			~FeedbackStageTimer()
+			{
+				destination = std::chrono::duration<double, std::milli>(
+					BatchClock::now() - begin).count();
+			}
+		} feedback_stage_timer{BatchClock::now(), _last_batch_timing.feedback};
         
         if (_last_fix_time[mode].find("sum") != _last_fix_time[mode].end())
         {
@@ -2453,6 +2491,10 @@ namespace great
         //////========================= Virtual observation equation ===========================================
         double dl = 0, flt = 0, integer = 0;
         double p0 = 1E9;
+		// Append the complete fixed set once. Growing the dense A/P matrices one
+		// row at a time is quadratic in the observation count.
+		t_gfltEquationMatrix virtual_equ;
+		int virtual_observation_count = 0;
         for (auto itdd = _DD.begin(); itdd != _DD.end(); itdd++)
         {
             // GLONASS uses satellite-dependent wavelength coefficients.
@@ -2546,17 +2588,19 @@ namespace great
 			constraint.integer_target = itdd->inl;
             _pending_fixed_constraints.push_back(constraint);
 
-            Matrix B_mat;
-            SymmetricMatrix P_mat;
-            ColumnVector l_mat;
-            t_gfltEquationMatrix virtual_equ;
             t_gobscombtype type;
             virtual_equ.add_equ(B, p0, dl, _site, get<0>(itdd->ddSats[0]) + "_" + get<0>(itdd->ddSats[1]), type, false);
-            virtual_equ.chageNewMat(B_mat, P_mat, l_mat, gflt->npar_number());
-
-            gflt->resetQ();
-            gflt->add_virtual_obs(B_mat, P_mat, l_mat);
+			++virtual_observation_count;
         }
+		if (virtual_observation_count > 0)
+		{
+			Matrix B_mat;
+			SymmetricMatrix P_mat;
+			ColumnVector l_mat;
+			virtual_equ.chageNewMat(B_mat, P_mat, l_mat, gflt->npar_number());
+			gflt->resetQ();
+			gflt->add_virtual_obs(B_mat, P_mat, l_mat);
+		}
 
         try
         {
@@ -2657,9 +2701,10 @@ namespace great
         double Bb= 0.0;
         double Bc= 0.0;
         double Bd= 0.0;       // the Coefficient of B matrix
-        SymmetricMatrix _Qx_tmp;
-        t_gflt flttmp(*gflt);
-        _Qx_tmp = gflt->Qx();
+		// Batch dense virtual rows to avoid repeatedly reallocating the full
+		// filter observation and weight matrices.
+		t_gfltEquationMatrix virtual_equ;
+		int virtual_observation_count = 0;
         if (mode == "EWL" || mode == "EWL24" || mode == "EWL25")
             p0 = 1E4;
         for (auto itdd = _DD.begin(); itdd != _DD.end(); itdd++)
@@ -2747,17 +2792,19 @@ namespace great
             B.push_back(make_pair(index_sat2, Bc));
             B.push_back(make_pair(index_sat4, Bd));
 
-            Matrix B_mat;
-            SymmetricMatrix P_mat;
-            ColumnVector l_mat;
-            t_gfltEquationMatrix virtual_equ;
             t_gobscombtype type;
             virtual_equ.add_equ(B, p0, dl, _site, get<0>(itdd->ddSats[0]) + "_" + get<0>(itdd->ddSats[2]) + "_" + get<0>(itdd->ddSats[1]) + "_" + get<0>(itdd->ddSats[3]), type, false);
-            virtual_equ.chageNewMat(B_mat, P_mat, l_mat, gflt->npar_number());
-
-            gflt->resetQ();
-            gflt->add_virtual_obs(B_mat, P_mat, l_mat);
+			++virtual_observation_count;
         }
+		if (virtual_observation_count > 0)
+		{
+			Matrix B_mat;
+			SymmetricMatrix P_mat;
+			ColumnVector l_mat;
+			virtual_equ.chageNewMat(B_mat, P_mat, l_mat, gflt->npar_number());
+			gflt->resetQ();
+			gflt->add_virtual_obs(B_mat, P_mat, l_mat);
+		}
         try
         {
             gflt->update();

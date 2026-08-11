@@ -99,7 +99,8 @@ namespace gnut
         double tdiff = t - _epoch;
 
         if (!_valid_crd() || sat().empty() ||
-            fabs(_epoch - t) > (fabs(_poly_x.xref() - _poly_x.span() / 2) + 0.25))
+            fabs(_epoch - t) >
+                (fabs(_poly_x.xref() - _poly_x.span() / 2) + MAX_PRECISE_EXTRAPOLATION))
         {
             if (_spdlog)
                 SPDLOG_LOGGER_WARN(_spdlog, "no ephemeris [" + _sat + t.str("] %Y-%m-%d %H:%M:%S") + " epoch: " + _epoch.str("%Y-%m-%d %H:%M:%S") + " tdiff: " + dbl2str(tdiff) + " xref: " + dbl2str(_poly_x.xref()) + " span: " + dbl2str(_poly_x.span()));
@@ -140,7 +141,8 @@ namespace gnut
 
         double tdiff = t - _epoch;
 
-        if (abs(tdiff) > (abs(_poly_c.xref() - _poly_c.span() / 2) + 0.25))
+        if (abs(tdiff) >
+            (abs(_poly_c.xref() - _poly_c.span() / 2) + MAX_PRECISE_EXTRAPOLATION))
         {
             if (_spdlog)
                 SPDLOG_LOGGER_WARN(_spdlog, "no clock [" + _sat + t.str("] %Y-%m-%d %H:%M:%S"));
@@ -181,7 +183,8 @@ namespace gnut
 
         double tdiff = t - _epoch;
 
-        if (abs(tdiff) > (abs(_poly_c.xref() - _poly_c.span() / 2) + 0.25))
+        if (abs(tdiff) >
+            (abs(_poly_c.xref() - _poly_c.span() / 2) + MAX_PRECISE_EXTRAPOLATION))
         {
             if (_spdlog)
                 SPDLOG_LOGGER_WARN(_spdlog, "no ephemeris [" + _sat + t.str("] %Y-%m-%d %H:%M:%S"));
@@ -212,7 +215,8 @@ namespace gnut
     bool t_gephprec::valid(const t_gtime &t) const
     {
         if (_valid_crd() && !sat().empty() &&
-            fabs(_epoch - t) < fabs(_poly_x.xref() - _poly_x.span() / 2) + 0.25) // add 0.25s!
+            fabs(_epoch - t) <=
+                fabs(_poly_x.xref() - _poly_x.span() / 2) + MAX_PRECISE_EXTRAPOLATION)
         {
             return true;
         }

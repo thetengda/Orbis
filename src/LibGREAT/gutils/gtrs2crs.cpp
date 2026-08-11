@@ -340,12 +340,17 @@ namespace great
         rec0.time = t0;
         rec1.time = t1;
         map<string, double> data0, data1;
-        data0 = (*(poleut1->getPoleUt1DataMap()))[rec0.time];
+        const auto *pole_data = poleut1->getPoleUt1DataMap();
+        const auto data0_iter = pole_data->find(rec0.time);
+        if (data0_iter != pole_data->end())
+            data0 = data0_iter->second;
         rec0.xpole = data0["XPOLE"];
         rec0.ypole = data0["YPOLE"];
         rec0.ut1 = data0["UT1-TAI"];
         rec.push_back(rec0);
-        data1 = (*(poleut1->getPoleUt1DataMap()))[rec1.time];
+        const auto data1_iter = pole_data->find(rec1.time);
+        if (data1_iter != pole_data->end())
+            data1 = data1_iter->second;
         rec1.xpole = data1["XPOLE"];
         rec1.ypole = data1["YPOLE"];
         rec1.ut1 = data1["UT1-TAI"];
@@ -386,8 +391,8 @@ namespace great
     {
         double stepsize = 0.015 * 86400.0; //unit sec
         double rmjd = t.dmjd();
-        static bool isfirst = true;
-        static t_pudaily tb0, tb1;
+        static thread_local bool isfirst = true;
+        static thread_local t_pudaily tb0, tb1;
         if (isfirst)
         {
             tb0.time = LAST_TIME;
@@ -654,9 +659,9 @@ namespace great
 
     double t_gtrs2crs::_tideCor2(const double& dRmjd)
     {
-        static t_zonaltide sTZB[3];
-        static double gdStepsize = 0.05;
-        static bool isFirst = true;
+        static thread_local t_zonaltide sTZB[3];
+        static const double gdStepsize = 0.05;
+        static thread_local bool isFirst = true;
         double dT;
         double pdUt1;
         if (isFirst)
@@ -1194,9 +1199,9 @@ namespace great
     ***********************/
     void t_gtrs2crs::_nutInt(const double& dRmjd, double* dpsi, double* deps, const double& step)
     {
-        static bool isFirst = true;
-        static double gdStepsize_used = 0.125;
-        static t_EpochNutation sTB1[3];
+        static thread_local bool isFirst = true;
+        static thread_local double gdStepsize_used = 0.125;
+        static thread_local t_EpochNutation sTB1[3];
 
         if ((isFirst) || fabs(gdStepsize_used - step) > pow(10.0, -10))
         {

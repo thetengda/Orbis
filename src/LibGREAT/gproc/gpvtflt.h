@@ -20,6 +20,7 @@
 #include "gmodels/gcombmodel.h"
 #include "gproc/gpreproc.h"
 #include "gproc/gfltmatrix.h"
+#include <array>
 //#include <Eigen/Dense>
 
 namespace great
@@ -155,6 +156,11 @@ namespace great
 
         /** @brief ambiguity resolution. */
         virtual int _amb_resolution();
+		/** Last epoch wall time for EWL/EWL24/EWL25/WL/NL, in milliseconds. */
+		std::array<double, 5> _last_ambiguity_mode_ms{{0.0, 0.0, 0.0, 0.0, 0.0}};
+		/** Aggregated internal ambiguity stages over all modes in the last epoch. */
+		std::array<double, 8> _last_ambiguity_stage_ms{{0.0, 0.0, 0.0, 0.0,
+			0.0, 0.0, 0.0, 0.0}};
 		/** Emit the current filter state as a Float AR row. */
 		void _output_float_ambiguity_solution();
 
