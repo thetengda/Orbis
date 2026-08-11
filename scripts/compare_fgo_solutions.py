@@ -42,7 +42,9 @@ from analyze_fgo_solution import (
     continuity_metrics,
     ecef_to_geodetic_lat_lon,
     format_epoch,
+    format_fraction,
     format_number,
+    normalize_status,
     parse_case,
     percentile,
     read_solution,
@@ -102,7 +104,7 @@ def group_intervals(
 
 def is_fixed(status: str) -> bool:
     """True when an ambiguity status string denotes a fixed solution."""
-    return status.lower() == "fixed"
+    return normalize_status(status) == "FIXED"
 
 
 def accuracy_pair(
@@ -161,8 +163,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entry point: parse args, compare the two files, emit report."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    finite_values = (
+        args.interval,
+        args.hours,
+        args.warmup_minutes,
+        args.delta_threshold,
+        args.horizontal_threshold,
+        args.vertical_threshold,
+        *(args.reference or ()),
+    )
+    if args.nominal_start_sow is not None:
+        finite_values += (args.nominal_start_sow,)
+    if not all(math.isfinite(value) for value in finite_values):
+        parser.error("reference and comparison parameters must be finite")
+    if args.reference and math.sqrt(sum(value * value for value in args.reference)) <= 1e-9:
+        parser.error("reference ECEF coordinate must be non-zero")
     if args.interval <= 0.0 or args.horizontal_threshold <= 0.0 or args.vertical_threshold <= 0.0:
         parser.error("interval and thresholds must be positive")
+    if args.hours <= 0.0:
+        parser.error("hours must be positive")
     if args.delta_threshold <= 0.0:
         parser.error("delta-threshold must be positive")
     if args.warmup_minutes < 0.0:
@@ -372,15 +391,16 @@ def markdown_report(report: Dict[str, object]) -> str:
         "",
         "## 输入概览",
         "",
-        "| 文件 | 行数 | SOW 范围 | malformed | nonfinite |",
-        "|---|---:|---:|---:|---:|",
+        "| 文件 | 行数 | SOW 范围 | malformed | nonfinite SOW | nonfinite XYZ |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
     for key in ("a", "b"):
         grid = report["grid"][key]
         lines.append(
             f"| {config['label_' + key]} | {grid['rows']} | "
             f"{grid['first_sow']:.0f}--{grid['last_sow']:.0f} | "
-            f"{grid['parse']['malformed_lines']} | {grid['parse']['nonfinite_xyz']} |"
+            f"{grid['parse']['malformed_lines']} | {grid['parse']['nonfinite_sow']} | "
+            f"{grid['parse']['nonfinite_xyz']} |"
         )
 
     lines.extend(["", "## 时间网格对比", ""])
@@ -407,7 +427,7 @@ def markdown_report(report: Dict[str, object]) -> str:
             continue
         lines.append(
             f"- {config['label_' + key]}：覆盖率 "
-            f"{format_number(100.0 * continuity['coverage_fraction'], 2)}%，"
+            f"{format_fraction(continuity['coverage_fraction'])}，"
             f"重复 {len(continuity['duplicate_epochs'])}，间隔 "
             f"{len(continuity['gap_intervals'])}，名义网格缺失 "
             f"{len(continuity['nominal_grid_missing_epochs'])}，"

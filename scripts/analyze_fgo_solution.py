@@ -86,9 +86,19 @@ def parse_case(value: str) -> Tuple[str, Path]:
     return label, Path(path.strip())
 
 
+def normalize_status(status: str) -> str:
+    """Use one status spelling for rates, transitions, and grouping."""
+    return status.strip().upper()
+
+
 def read_solution(path: Path) -> Tuple[List[SolutionRow], Dict[str, int]]:
     rows: List[SolutionRow] = []
-    diagnostics = {"data_lines": 0, "malformed_lines": 0, "nonfinite_xyz": 0}
+    diagnostics = {
+        "data_lines": 0,
+        "malformed_lines": 0,
+        "nonfinite_sow": 0,
+        "nonfinite_xyz": 0,
+    }
     with path.open("r", encoding="utf-8", errors="replace") as stream:
         for line_number, line in enumerate(stream, 1):
             if not line.strip() or line.lstrip().startswith("#"):
@@ -108,6 +118,9 @@ def read_solution(path: Path) -> Tuple[List[SolutionRow], Dict[str, int]]:
             except (IndexError, ValueError):
                 diagnostics["malformed_lines"] += 1
                 continue
+            if not math.isfinite(row.sow):
+                diagnostics["nonfinite_sow"] += 1
+                continue
             if not all(math.isfinite(value) for value in row.xyz):
                 diagnostics["nonfinite_xyz"] += 1
             rows.append(row)
@@ -117,11 +130,18 @@ def read_solution(path: Path) -> Tuple[List[SolutionRow], Dict[str, int]]:
 
 def ecef_to_geodetic_lat_lon(x: float, y: float, z: float) -> Tuple[float, float]:
     """Return WGS-84 geodetic latitude and longitude in radians."""
+    if not all(math.isfinite(value) for value in (x, y, z)):
+        raise ValueError("reference ECEF coordinate must be finite")
     a = 6378137.0
     f = 1.0 / 298.257223563
     e2 = f * (2.0 - f)
     lon = math.atan2(y, x)
     p = math.hypot(x, y)
+    norm = math.sqrt(x * x + y * y + z * z)
+    if norm <= 1e-9:
+        raise ValueError("reference ECEF coordinate must be non-zero")
+    if p <= 1e-9:
+        return math.copysign(math.pi / 2.0, z), 0.0
     lat = math.atan2(z, p * (1.0 - e2))
     for _ in range(12):
         sin_lat = math.sin(lat)
@@ -234,12 +254,12 @@ def accuracy_metrics(
     up = [row.up for row in errors]
     horizontal = [row.horizontal for row in errors]
     three_d = [row.three_d for row in errors]
-    fixed_count = sum(row.status.lower() == "fixed" for row in errors)
+    fixed_count = sum(normalize_status(row.status) == "FIXED" for row in errors)
     correct_count = sum(row.correct for row in errors)
     correct_fixed_count = sum(
-        row.correct and row.status.lower() == "fixed" for row in errors
+        row.correct and normalize_status(row.status) == "FIXED" for row in errors
     )
-    status_counts = Counter(row.status.strip().upper() for row in errors)
+    status_counts = Counter(normalize_status(row.status) for row in errors)
     known_statuses = {"FIXED", "FLOAT"}
     threshold_rates = {}
     for threshold in (0.01, 0.02, 0.05, 0.10, 0.20):
@@ -260,7 +280,7 @@ def accuracy_metrics(
     if include_status_breakdown:
         for status in sorted(status_counts):
             status_breakdown[status] = accuracy_metrics(
-                [row for row in errors if row.status.strip().upper() == status],
+                [row for row in errors if normalize_status(row.status) == status],
                 include_status_breakdown=False,
             )
     return {
@@ -325,9 +345,11 @@ def continuity_metrics(
             duplicate_epochs.append(current.sow)
         elif abs(delta - interval) > 1e-6:
             gap_intervals.append({"after_sow": previous.sow, "before_sow": current.sow, "delta_s": delta})
-    nominal_end = nominal_start + hours * 3600.0
-    expected_rows = max(0, int(round(hours * 3600.0 / interval)))
+    duration_s = hours * 3600.0
+    # Treat the span as [start, end): include every grid epoch before end.
+    expected_rows = max(0, int(math.ceil(duration_s / interval - 1e-9)))
     expected_epochs = [nominal_start + interval * index for index in range(expected_rows)]
+    expected_last = expected_epochs[-1] if expected_epochs else None
     observed_epoch_keys = {round(row.sow, 6) for row in rows}
     missing_epochs = [
         sow for sow in expected_epochs if round(sow, 6) not in observed_epoch_keys
@@ -336,7 +358,7 @@ def continuity_metrics(
         row.sow
         for row in rows
         if row.sow < nominal_start - 1e-6
-        or row.sow > nominal_end - interval + 1e-6
+        or (expected_last is not None and row.sow > expected_last + 1e-6)
     ]
     return {
         "rows": len(rows),
@@ -348,7 +370,9 @@ def continuity_metrics(
             rows[0].sow - nominal_start if rows else None
         ),
         "end_shortfall_s": (
-            (nominal_end - interval) - rows[-1].sow if rows else None
+            expected_last - rows[-1].sow
+            if rows and expected_last is not None
+            else None
         ),
         "duplicate_epochs": duplicate_epochs,
         "gap_intervals": gap_intervals,
@@ -400,9 +424,16 @@ def convergence_metrics(
     errors: Sequence[ErrorRow], window_samples: int, interval: float
 ) -> Dict[str, Optional[float]]:
     first_correct = next((row.sow for row in errors if row.correct), None)
-    first_fixed = next((row.sow for row in errors if row.status.lower() == "fixed"), None)
+    first_fixed = next(
+        (row.sow for row in errors if normalize_status(row.status) == "FIXED"), None
+    )
     first_correct_fixed = next(
-        (row.sow for row in errors if row.correct and row.status.lower() == "fixed"), None
+        (
+            row.sow
+            for row in errors
+            if row.correct and normalize_status(row.status) == "FIXED"
+        ),
+        None,
     )
     return {
         "first_threshold_epoch": first_correct,
@@ -416,7 +447,7 @@ def convergence_metrics(
             errors,
             window_samples,
             interval,
-            lambda row: row.correct and row.status.lower() == "fixed",
+            lambda row: row.correct and normalize_status(row.status) == "FIXED",
         ),
     }
 
@@ -444,7 +475,7 @@ def group_events(
                 "max_abs_vertical_m": max(abs(row.up) for row in group),
                 "max_three_d_m": max(row.three_d for row in group),
                 "min_nsat": min(row.nsat for row in group),
-                "statuses": sorted(set(row.status for row in group)),
+                "statuses": sorted(set(normalize_status(row.status) for row in group)),
             }
         )
     return result
@@ -480,7 +511,7 @@ def anomaly_metrics(
 
     status_transitions: List[Dict[str, object]] = []
     for previous, current in zip(errors, errors[1:]):
-        if previous.status != current.status:
+        if normalize_status(previous.status) != normalize_status(current.status):
             status_transitions.append(
                 {"sow": current.sow, "from": previous.status, "to": current.status}
             )
@@ -641,6 +672,7 @@ def availability_metrics(
         "finite_coordinate_rows": finite_rows,
         "malformed_rows": diagnostics["malformed_lines"],
         "nonfinite_coordinate_rows": diagnostics["nonfinite_xyz"],
+        "nonfinite_epoch_rows": diagnostics["nonfinite_sow"],
         "finite_coordinate_fraction": finite_rows / data_lines if data_lines else None,
         "malformed_fraction": (
             diagnostics["malformed_lines"] / data_lines if data_lines else None
@@ -648,7 +680,7 @@ def availability_metrics(
         "nonfinite_coordinate_fraction": (
             diagnostics["nonfinite_xyz"] / data_lines if data_lines else None
         ),
-        "status_count": len(Counter(row.status.strip().upper() for row in rows)),
+        "status_count": len(Counter(normalize_status(row.status) for row in rows)),
     }
 
 
@@ -772,6 +804,8 @@ def quality_gate_metrics(case: Dict[str, object], args: argparse.Namespace) -> D
 
     if parse["malformed_lines"]:
         failures.append(f"malformed output lines={parse['malformed_lines']}")
+    if parse["nonfinite_sow"]:
+        failures.append(f"non-finite epochs={parse['nonfinite_sow']}")
     if parse["nonfinite_xyz"]:
         failures.append(f"non-finite coordinates={parse['nonfinite_xyz']}")
     if args.require_complete and not continuity["complete_nominal_span"]:
@@ -1165,12 +1199,13 @@ def markdown_report(report: Dict[str, object]) -> str:
                 ),
                 "",
                 (
-                    f"完整性：malformed={parse['malformed_lines']}，nonfinite={parse['nonfinite_xyz']}，"
+                    f"完整性：malformed={parse['malformed_lines']}，nonfinite SOW={parse['nonfinite_sow']}，"
+                    f"nonfinite XYZ={parse['nonfinite_xyz']}，"
                     f"duplicate={len(continuity['duplicate_epochs'])}，gap={len(continuity['gap_intervals'])}，"
                     f"名义网格缺失={len(continuity['nominal_grid_missing_epochs'])}，"
                     f"起点延迟={format_number(continuity['start_delay_s'], 1)} s，"
                     f"末端缺失={format_number(continuity['end_shortfall_s'], 1)} s，"
-                    f"覆盖率={format_number(100.0 * continuity['coverage_fraction'], 2)}%；"
+                    f"覆盖率={format_fraction(continuity['coverage_fraction'])}；"
                     f"有限坐标行={availability['finite_coordinate_rows']}/"
                     f"{availability['data_lines']}（{format_fraction(availability['finite_coordinate_fraction'])}）。"
                 ),
@@ -1339,12 +1374,59 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    finite_values = (
+        *args.reference,
+        args.nominal_start_sow,
+        args.interval,
+        args.hours,
+        args.warmup_minutes,
+        args.window_minutes,
+        args.horizontal_threshold,
+        args.vertical_threshold,
+        args.jump_threshold,
+        args.three_d_anomaly_threshold,
+        args.baseline_delta_threshold,
+    )
+    if not all(math.isfinite(value) for value in finite_values):
+        parser.error("reference and analysis parameters must be finite")
+    if math.sqrt(sum(value * value for value in args.reference)) <= 1e-9:
+        parser.error("reference ECEF coordinate must be non-zero")
+    if args.hours <= 0.0:
+        parser.error("hours must be positive")
     if args.interval <= 0.0 or args.window_minutes <= 0.0:
         parser.error("interval and window-minutes must be positive")
+    if args.warmup_minutes < 0.0:
+        parser.error("warmup-minutes must be non-negative")
     if args.horizontal_threshold <= 0.0 or args.vertical_threshold <= 0.0:
         parser.error("convergence thresholds must be positive")
     if args.jump_threshold <= 0.0 or args.three_d_anomaly_threshold <= 0.0:
         parser.error("anomaly thresholds must be positive")
+    if args.min_nsat < 0:
+        parser.error("min-nsat must be non-negative")
+    optional_numeric = (
+        "max_sustained_minutes",
+        "max_permanent_minutes",
+        "min_fixed_fraction",
+        "min_correct_fixed_fraction",
+        "max_post_convergence_3d",
+        "max_baseline_delta",
+    )
+    for name in optional_numeric:
+        value = getattr(args, name)
+        if value is not None and not math.isfinite(value):
+            parser.error(f"{name.replace('_', '-')} must be finite")
+    for name in ("max_sustained_minutes", "max_permanent_minutes", "max_post_convergence_3d", "max_baseline_delta"):
+        value = getattr(args, name)
+        if value is not None and value < 0.0:
+            parser.error(f"{name.replace('_', '-')} must be non-negative")
+    for name in ("min_fixed_fraction", "min_correct_fixed_fraction"):
+        value = getattr(args, name)
+        if value is not None and not 0.0 <= value <= 1.0:
+            parser.error(f"{name.replace('_', '-')} must be between 0 and 1")
+    for name in ("max_coordinate_jumps", "max_status_transitions", "max_baseline_delta_exceedances"):
+        value = getattr(args, name)
+        if value is not None and value < 0:
+            parser.error(f"{name.replace('_', '-')} must be non-negative")
     args.window_samples = max(1, int(math.ceil(args.window_minutes * 60.0 / args.interval)))
 
     baseline_rows: List[SolutionRow] = []

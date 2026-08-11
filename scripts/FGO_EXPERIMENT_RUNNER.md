@@ -23,7 +23,7 @@ first correct fixed epoch, and 3D RMS/MAE/P95/P99/maximum error.
 
 The JSON analysis also includes status counts, per-status truth error
 statistics, horizontal 2DRMS/CEP and threshold pass rates (1/2/5/10/20 cm),
-finite-coordinate availability, baseline epoch matching, hourly statistics,
+finite-coordinate/epoch availability, baseline epoch matching, hourly statistics,
 epoch-to-epoch stability/step distributions, anomaly intervals, coordinate
 jumps, and optional quality gates.
 The runner extracts `Spent` and DEBUG FGO phase timing when those lines are
