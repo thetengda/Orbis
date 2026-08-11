@@ -21,8 +21,11 @@ The final report includes process and matrix wall time, station epochs per
 second, real-time factor, fixed rate, first sustained/permanent convergence,
 first correct fixed epoch, and 3D RMS/MAE/P95/P99/maximum error.
 
-The JSON analysis also includes status counts, baseline epoch matching, hourly
-statistics, anomaly intervals, coordinate jumps, and optional quality gates.
+The JSON analysis also includes status counts, per-status truth error
+statistics, horizontal 2DRMS/CEP and threshold pass rates (1/2/5/10/20 cm),
+finite-coordinate availability, baseline epoch matching, hourly statistics,
+epoch-to-epoch stability/step distributions, anomaly intervals, coordinate
+jumps, and optional quality gates.
 The runner extracts `Spent` and DEBUG FGO phase timing when those lines are
 present, including RAW/Ceres phase min/mean/max/total times, graph dimensions,
 and average solver iterations.

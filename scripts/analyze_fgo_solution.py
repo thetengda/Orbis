@@ -226,7 +226,9 @@ def component_statistics(
     }
 
 
-def accuracy_metrics(errors: Sequence[ErrorRow]) -> Dict[str, object]:
+def accuracy_metrics(
+    errors: Sequence[ErrorRow], *, include_status_breakdown: bool = True
+) -> Dict[str, object]:
     east = [row.east for row in errors]
     north = [row.north for row in errors]
     up = [row.up for row in errors]
@@ -239,6 +241,28 @@ def accuracy_metrics(errors: Sequence[ErrorRow]) -> Dict[str, object]:
     )
     status_counts = Counter(row.status.strip().upper() for row in errors)
     known_statuses = {"FIXED", "FLOAT"}
+    threshold_rates = {}
+    for threshold in (0.01, 0.02, 0.05, 0.10, 0.20):
+        suffix = f"{int(threshold * 100):02d}cm"
+        threshold_rates[f"horizontal_le_{suffix}"] = (
+            sum(row.horizontal <= threshold for row in errors) / len(errors)
+            if errors else None
+        )
+        threshold_rates[f"vertical_abs_le_{suffix}"] = (
+            sum(abs(row.up) <= threshold for row in errors) / len(errors)
+            if errors else None
+        )
+        threshold_rates[f"three_d_le_{suffix}"] = (
+            sum(row.three_d <= threshold for row in errors) / len(errors)
+            if errors else None
+        )
+    status_breakdown = {}
+    if include_status_breakdown:
+        for status in sorted(status_counts):
+            status_breakdown[status] = accuracy_metrics(
+                [row for row in errors if row.status.strip().upper() == status],
+                include_status_breakdown=False,
+            )
     return {
         "count": len(errors),
         "east_bias_m": statistics.fmean(east) if east else None,
@@ -248,6 +272,11 @@ def accuracy_metrics(errors: Sequence[ErrorRow]) -> Dict[str, object]:
         "north_std_m": sample_std(north),
         "up_std_m": sample_std(up),
         "horizontal_rms_m": rms(horizontal),
+        "horizontal_2drms_m": 2.0 * rms(horizontal) if horizontal else None,
+        "horizontal_cep50_m": percentile(horizontal, 0.50),
+        "horizontal_cep95_m": percentile(horizontal, 0.95),
+        "horizontal_cep99_m": percentile(horizontal, 0.99),
+        "horizontal_max_m": max(horizontal) if horizontal else None,
         "vertical_rms_m": rms(up),
         "three_d_mean_m": statistics.fmean(three_d) if three_d else None,
         "three_d_mae_m": statistics.fmean(three_d) if three_d else None,
@@ -270,6 +299,8 @@ def accuracy_metrics(errors: Sequence[ErrorRow]) -> Dict[str, object]:
         "unknown_status_count": sum(
             count for status, count in status_counts.items() if status not in known_statuses
         ),
+        "threshold_rates": threshold_rates,
+        "status_breakdown": status_breakdown,
         "detailed": {
             "east": component_statistics(east, signed_component=True),
             "north": component_statistics(north, signed_component=True),
@@ -479,6 +510,44 @@ def anomaly_metrics(
     }
 
 
+def stability_metrics(
+    errors: Sequence[ErrorRow], interval: float, jump_threshold: float
+) -> Dict[str, object]:
+    """Summarize epoch-to-epoch motion of the reported solution.
+
+    The reference coordinate is static, so an ENU error difference is also the
+    coordinate step between adjacent solution epochs.  Gaps are excluded so a
+    missing output epoch is not misreported as a physical jump.
+    """
+    steps: List[float] = []
+    horizontal_steps: List[float] = []
+    vertical_steps: List[float] = []
+    for previous, current in zip(errors, errors[1:]):
+        if not is_consecutive(previous, current, interval):
+            continue
+        de = current.east - previous.east
+        dn = current.north - previous.north
+        du = current.up - previous.up
+        horizontal_steps.append(math.hypot(de, dn))
+        vertical_steps.append(abs(du))
+        steps.append(math.sqrt(de * de + dn * dn + du * du))
+    jump_count = sum(step > jump_threshold for step in steps)
+    return {
+        "count": len(steps),
+        "mean_m": statistics.fmean(steps) if steps else None,
+        "rms_m": rms(steps),
+        "p50_m": percentile(steps, 0.50),
+        "p95_m": percentile(steps, 0.95),
+        "p99_m": percentile(steps, 0.99),
+        "max_m": max(steps) if steps else None,
+        "horizontal_rms_m": rms(horizontal_steps),
+        "vertical_abs_rms_m": rms(vertical_steps),
+        "jump_threshold_m": jump_threshold,
+        "above_jump_threshold_count": jump_count,
+        "above_jump_threshold_fraction": jump_count / len(steps) if steps else None,
+    }
+
+
 def baseline_metrics(
     rows: Sequence[SolutionRow], baseline_by_epoch: Dict[float, SolutionRow]
 ) -> Tuple[Dict[str, object], List[Dict[str, float]]]:
@@ -558,6 +627,31 @@ def hourly_metrics(
     return result
 
 
+def availability_metrics(
+    rows: Sequence[SolutionRow],
+    errors: Sequence[ErrorRow],
+    diagnostics: Dict[str, int],
+) -> Dict[str, object]:
+    """Describe how much of the result file can be evaluated against truth."""
+    data_lines = diagnostics["data_lines"]
+    finite_rows = len(errors)
+    return {
+        "data_lines": data_lines,
+        "parsed_rows": len(rows),
+        "finite_coordinate_rows": finite_rows,
+        "malformed_rows": diagnostics["malformed_lines"],
+        "nonfinite_coordinate_rows": diagnostics["nonfinite_xyz"],
+        "finite_coordinate_fraction": finite_rows / data_lines if data_lines else None,
+        "malformed_fraction": (
+            diagnostics["malformed_lines"] / data_lines if data_lines else None
+        ),
+        "nonfinite_coordinate_fraction": (
+            diagnostics["nonfinite_xyz"] / data_lines if data_lines else None
+        ),
+        "status_count": len(Counter(row.status.strip().upper() for row in rows)),
+    }
+
+
 def analyze_case(
     label: str,
     path: Path,
@@ -590,6 +684,7 @@ def analyze_case(
     permanent_errors = [
         row for row in errors if permanent is not None and row.sow >= permanent
     ]
+    availability = availability_metrics(rows, errors, diagnostics)
     baseline_exceedances = [
         item
         for item in baseline_deltas
@@ -618,6 +713,7 @@ def analyze_case(
         "label": label,
         "path": str(path),
         "parse": diagnostics,
+        "availability": availability,
         "continuity": continuity_metrics(
             rows, args.interval, args.nominal_start_sow, args.hours
         ),
@@ -625,6 +721,16 @@ def analyze_case(
         "accuracy_after_warmup": accuracy_metrics(warm_errors),
         "accuracy_after_sustained_convergence": accuracy_metrics(sustained_errors),
         "accuracy_after_permanent_convergence": accuracy_metrics(permanent_errors),
+        "stability_all": stability_metrics(errors, args.interval, args.jump_threshold),
+        "stability_after_warmup": stability_metrics(
+            warm_errors, args.interval, args.jump_threshold
+        ),
+        "stability_after_sustained_convergence": stability_metrics(
+            sustained_errors, args.interval, args.jump_threshold
+        ),
+        "stability_after_permanent_convergence": stability_metrics(
+            permanent_errors, args.interval, args.jump_threshold
+        ),
         "warmup_start_sow": warm_start,
         "convergence": convergence,
         "baseline_comparison_all": baseline_summary,
@@ -763,6 +869,14 @@ def format_number(value: object, digits: int = 4) -> str:
             return str(value)
         return f"{value:.{digits}f}"
     return str(value)
+
+
+def format_fraction(value: object, digits: int = 2) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return f"{100.0 * float(value):.{digits}f}%"
+    return "—"
 
 
 def format_epoch(value: Optional[float], nominal_start: float) -> str:
@@ -940,6 +1054,68 @@ def markdown_report(report: Dict[str, object]) -> str:
                     )
                 )
 
+        warm_thresholds = case["accuracy_after_warmup"]["threshold_rates"]
+        lines.extend(
+            [
+                "",
+                "热启动后真值达标率（仅统计可转换为有限 ENU 误差的历元）：",
+                "",
+                "| 门限 | 水平 | |U| | 3D |",
+                "|---:|---:|---:|---:|",
+            ]
+        )
+        for threshold_cm in (1, 2, 5, 10, 20):
+            suffix = f"{threshold_cm:02d}cm"
+            lines.append(
+                f"| {threshold_cm} cm | "
+                f"{format_fraction(warm_thresholds.get(f'horizontal_le_{suffix}'))} | "
+                f"{format_fraction(warm_thresholds.get(f'vertical_abs_le_{suffix}'))} | "
+                f"{format_fraction(warm_thresholds.get(f'three_d_le_{suffix}'))} |"
+            )
+
+        lines.extend(
+            [
+                "",
+                "热启动后按输出状态分组的真值误差（避免 Fixed 率掩盖错误固定）：",
+                "",
+                "| 状态 | n | 真值达标 | H RMS | H p95 | H max | |U| RMS | 3D RMS | 3D p95 | 3D max |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for status, stats in case["accuracy_after_warmup"]["status_breakdown"].items():
+            lines.append(
+                f"| {status} | {stats['count']} | {format_fraction(stats['correct_fraction'])} | "
+                f"{format_number(stats['horizontal_rms_m'])} | "
+                f"{format_number(stats['horizontal_cep95_m'])} | {format_number(stats['horizontal_max_m'])} | "
+                f"{format_number(stats['vertical_rms_m'])} | {format_number(stats['three_d_rms_m'])} | "
+                f"{format_number(stats['three_d_p95_m'])} | {format_number(stats['three_d_max_m'])} |"
+            )
+        if not case["accuracy_after_warmup"]["status_breakdown"]:
+            lines.append("| — | 0 | — | — | — | — | — | — | — | — |")
+
+        lines.extend(
+            [
+                "",
+                "历元间稳定性（相邻有效采样间的 ECEF/ENU 三维步长；存在时间缺口时不跨缺口计算）：",
+                "",
+                "| 时段 | 步数 | 步长 RMS | p95 | p99 | max | H 步长 RMS | |U| 步长 RMS | 超过跳变门限 |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for period_name, stability in (
+            ("全段", case["stability_all"]),
+            ("热启动后", case["stability_after_warmup"]),
+            ("永久收敛后", case["stability_after_permanent_convergence"]),
+        ):
+            lines.append(
+                f"| {period_name} | {stability['count']} | {format_number(stability['rms_m'])} | "
+                f"{format_number(stability['p95_m'])} | {format_number(stability['p99_m'])} | "
+                f"{format_number(stability['max_m'])} | {format_number(stability['horizontal_rms_m'])} | "
+                f"{format_number(stability['vertical_abs_rms_m'])} | "
+                f"{stability['above_jump_threshold_count']} / "
+                f"{format_fraction(stability['above_jump_threshold_fraction'])} |"
+            )
+
         baseline = case["baseline_comparison_after_warmup"]
         lines.extend(
             [
@@ -972,6 +1148,7 @@ def markdown_report(report: Dict[str, object]) -> str:
         anomalies = case["anomalies"]
         continuity = case["continuity"]
         parse = case["parse"]
+        availability = case["availability"]
         convergence = case["convergence"]
         lines.extend(
             [
@@ -993,7 +1170,9 @@ def markdown_report(report: Dict[str, object]) -> str:
                     f"名义网格缺失={len(continuity['nominal_grid_missing_epochs'])}，"
                     f"起点延迟={format_number(continuity['start_delay_s'], 1)} s，"
                     f"末端缺失={format_number(continuity['end_shortfall_s'], 1)} s，"
-                    f"覆盖率={format_number(100.0 * continuity['coverage_fraction'], 2)}%。"
+                    f"覆盖率={format_number(100.0 * continuity['coverage_fraction'], 2)}%；"
+                    f"有限坐标行={availability['finite_coordinate_rows']}/"
+                    f"{availability['data_lines']}（{format_fraction(availability['finite_coordinate_fraction'])}）。"
                 ),
                 (
                     "状态计数："
