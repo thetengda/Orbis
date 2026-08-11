@@ -373,7 +373,8 @@ void gfgomsf::t_gfgo_gins::_capture_alignment_gnss_prior()
 		par_type::TRP,
 		par_type::GAL_ISB,
 		par_type::BDS_ISB,
-		par_type::GLO_ISB
+		par_type::GLO_ISB,
+		par_type::QZS_ISB
 	};
 
 	vector<int> covariance_indices;
@@ -482,6 +483,10 @@ bool gfgomsf::t_gfgo_gins::_make_alignment_gnss_prior(
 		case par_type::GLO_ISB:
 			if (!_lost_isb_GLO[0])
 				parameter_block = const_cast<double*>(_para_ISB_GLO[0]);
+			break;
+		case par_type::QZS_ISB:
+			if (!_lost_isb_QZS[0])
+				parameter_block = const_cast<double*>(_para_ISB_QZS[0]);
 			break;
 		default:
 			break;
@@ -1306,6 +1311,8 @@ void gfgomsf::t_gfgo_gins::_gins_double_to_vector()
 				_isb_BDS[i] = _para_ISB_BDS[i][0];
 			if (!_lost_isb_GLO[i])
 				_isb_GLO[i] = _para_ISB_GLO[i][0];
+			if (!_lost_isb_QZS[i])
+				_isb_QZS[i] = _para_ISB_QZS[i][0];
 		}
 	}
 }
@@ -1373,6 +1380,8 @@ void gfgomsf::t_gfgo_gins::_gins_vector_to_double()
 				_para_ISB_BDS[i][0] = _isb_BDS[i];
 			if (!_lost_isb_GLO[i])
 				_para_ISB_GLO[i][0] = _isb_GLO[i];
+			if (!_lost_isb_QZS[i])
+				_para_ISB_QZS[i][0] = _isb_QZS[i];
 		}
 	}
 
@@ -1723,6 +1732,8 @@ void gfgomsf::t_gfgo_gins::_gins_optimization_PPP() {
 				problem.AddParameterBlock(_para_ISB_BDS[i], 1);
 			if (!_lost_isb_GLO[i])
 				problem.AddParameterBlock(_para_ISB_GLO[i], 1);
+			if (!_lost_isb_QZS[i])
+				problem.AddParameterBlock(_para_ISB_QZS[i], 1);
 			// Do not add a moving, near-zero prior centred at the current value here.
 			// The fixed prior for node 0 is added once below when no marginal prior exists.
 		}
@@ -1781,6 +1792,13 @@ void gfgomsf::t_gfgo_gins::_gins_optimization_PPP() {
 				double sqrt_info_glo = 1.0 / sqrt(_gloStoModel->getQ());
 				RandomWalkFactor* glof = new RandomWalkFactor(sqrt_info_glo);
 				problem.AddResidualBlock(glof, NULL, _para_ISB_GLO[i], _para_ISB_GLO[i + 1]);
+			}
+
+			if (!_lost_isb_QZS[i] && !_lost_isb_QZS[i + 1])
+			{
+				double sqrt_info_qzs = 1.0 / sqrt(_qzsStoModel->getQ());
+				RandomWalkFactor* qzsf = new RandomWalkFactor(sqrt_info_qzs);
+				problem.AddResidualBlock(qzsf, NULL, _para_ISB_QZS[i], _para_ISB_QZS[i + 1]);
 			}
 		}
 
@@ -1856,6 +1874,14 @@ void gfgomsf::t_gfgo_gins::_gins_optimization_PPP() {
 					new InitialFactor(0.0, 1.0 / _sig_init_glo);
 				problem.AddResidualBlock(
 					glo_initial_factor, NULL, _para_ISB_GLO[0]);
+			}
+
+			if (!_lost_isb_QZS[0])
+			{
+				InitialFactor* qzs_initial_factor =
+					new InitialFactor(0.0, 1.0 / _sig_init_qzs);
+				problem.AddResidualBlock(
+					qzs_initial_factor, NULL, _para_ISB_QZS[0]);
 			}
 		}
 
@@ -1949,6 +1975,14 @@ void gfgomsf::t_gfgo_gins::_gins_optimization_PPP() {
 						problem.AddResidualBlock(pf, loss_function,
 							_para_pose[i], _para_CLK[i], _para_TRP[i], _para_ISB_GLO[i]);
 					}
+					else if (gsys == GSYS::QZS && !_lost_isb_QZS[i])
+					{
+						MultiPseudorangeIFINGFactor* pf = new MultiPseudorangeIFINGFactor(
+							if_iter.time, if_iter.site, params_temp, if_iter.satdata,
+							_gbias_model, freq_band1, freq_band2, lever);
+						problem.AddResidualBlock(pf, loss_function,
+							_para_pose[i], _para_CLK[i], _para_TRP[i], _para_ISB_QZS[i]);
+					}
 				}
 
 				if (obstype == GOBSTYPE::TYPE_L)
@@ -1988,6 +2022,14 @@ void gfgomsf::t_gfgo_gins::_gins_optimization_PPP() {
 							_gbias_model, freq_band1, freq_band2, lever);
 						problem.AddResidualBlock(lf, loss_function_CP,
 							_para_pose[i], _para_CLK[i], _para_TRP[i], _para_ISB_GLO[i], _para_AMB_IF[id]);
+					}
+					else if (gsys == GSYS::QZS && !_lost_isb_QZS[i])
+					{
+						MultiCarrierphaseIFINGFactor* lf = new MultiCarrierphaseIFINGFactor(
+							if_iter.time, if_iter.site, params_temp, if_iter.satdata,
+							_gbias_model, freq_band1, freq_band2, lever);
+						problem.AddResidualBlock(lf, loss_function_CP,
+							_para_pose[i], _para_CLK[i], _para_TRP[i], _para_ISB_QZS[i], _para_AMB_IF[id]);
 					}
 				}
 			}
@@ -2243,7 +2285,8 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization_PPP() {
 						_last_marginalization_parameter_blocks[i] == _para_TRP[0] ||
 						_last_marginalization_parameter_blocks[i] == _para_ISB_GAL[0] ||
 						_last_marginalization_parameter_blocks[i] == _para_ISB_BDS[0] ||
-						_last_marginalization_parameter_blocks[i] == _para_ISB_GLO[0])
+						_last_marginalization_parameter_blocks[i] == _para_ISB_GLO[0] ||
+						_last_marginalization_parameter_blocks[i] == _para_ISB_QZS[0])
 					{
 						drop_set.push_back(i);
 					}
@@ -2383,6 +2426,18 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization_PPP() {
 								vector<double*>{ _para_ISB_GLO[0] },
 								vector<int>{ 0 }));
 					}
+
+					if (!_lost_isb_QZS[0])
+					{
+						InitialFactor* qzs_initial_factor =
+							new InitialFactor(0.0, 1.0 / _sig_init_qzs);
+						marginalization_info->addResidualBlockInfo(
+							new ResidualBlockInfo(
+								qzs_initial_factor,
+								NULL,
+								vector<double*>{ _para_ISB_QZS[0] },
+								vector<int>{ 0 }));
+					}
 				}
 			}
 
@@ -2435,6 +2490,18 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization_PPP() {
 					vector<double*>{_para_ISB_GLO[0], _para_ISB_GLO[1]},
 					vector<int>{0});
 				marginalization_info->addResidualBlockInfo(glo_info);
+			}
+
+			if (!_lost_isb_QZS[0] && !_lost_isb_QZS[1])
+			{
+				double sqrt_info_qzs = 1.0 / sqrt(_qzsStoModel->getQ());
+				RandomWalkFactor* qzsf = new RandomWalkFactor(sqrt_info_qzs);
+				ResidualBlockInfo* qzs_info = new ResidualBlockInfo(
+					qzsf,
+					NULL,
+					vector<double*>{_para_ISB_QZS[0], _para_ISB_QZS[1]},
+					vector<int>{0});
+				marginalization_info->addResidualBlockInfo(qzs_info);
 			}
 
 			vector<IFEquMsg> IF_tmp = _vIF_msg[0];
@@ -2513,6 +2580,21 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization_PPP() {
 							ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(
 								pf, loss_function,
 								vector<double*>{_para_pose[0], _para_CLK[0], _para_TRP[0], _para_ISB_GLO[0]},
+								drop_set);
+
+							marginalization_info->addResidualBlockInfo(residual_block_info);
+						}
+						else if (gsys == GSYS::QZS && !_lost_isb_QZS[0])
+						{
+							drop_set.push_back(3);
+
+							MultiPseudorangeIFINGFactor* pf = new MultiPseudorangeIFINGFactor(
+								if_iter.time, if_iter.site, params_temp, if_iter.satdata,
+								_gbias_model, freq_band1, freq_band2, lever);
+
+							ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(
+								pf, loss_function,
+								vector<double*>{_para_pose[0], _para_CLK[0], _para_TRP[0], _para_ISB_QZS[0]},
 								drop_set);
 
 							marginalization_info->addResidualBlockInfo(residual_block_info);
@@ -2615,6 +2697,22 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization_PPP() {
 
 								marginalization_info->addResidualBlockInfo(residual_block_info);
 							}
+							else if (gsys == GSYS::QZS && !_lost_isb_QZS[0])
+							{
+								drop_set.push_back(3);
+								if (drop_amb) drop_set.push_back(4);
+
+								MultiCarrierphaseIFINGFactor* lf = new MultiCarrierphaseIFINGFactor(
+									if_iter.time, if_iter.site, params_temp, if_iter.satdata,
+									_gbias_model, freq_band1, freq_band2, lever);
+
+								ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(
+									lf, loss_function_CP,
+									vector<double*>{_para_pose[0], _para_CLK[0], _para_TRP[0], _para_ISB_QZS[0], _para_AMB_IF[amb_id]},
+									drop_set);
+
+								marginalization_info->addResidualBlockInfo(residual_block_info);
+							}
 						}
 					}
 				}
@@ -2642,6 +2740,9 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization_PPP() {
 
 				if (!_lost_isb_GLO[i - 1] && !_lost_isb_GLO[i])
 					addr_shift[reinterpret_cast<std::uintptr_t>(_para_ISB_GLO[i])] = _para_ISB_GLO[i - 1];
+
+				if (!_lost_isb_QZS[i - 1] && !_lost_isb_QZS[i])
+					addr_shift[reinterpret_cast<std::uintptr_t>(_para_ISB_QZS[i])] = _para_ISB_QZS[i - 1];
 			}
 
 			vector<int> cur_amb = _ambIF_manager->getCurWinAmb();
@@ -2706,9 +2807,11 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 				_isb_GAL[i] = _isb_GAL[i + 1];
 				_isb_BDS[i] = _isb_BDS[i + 1];
 				_isb_GLO[i] = _isb_GLO[i + 1];
+				_isb_QZS[i] = _isb_QZS[i + 1];
 				_lost_isb_GAL[i] = _lost_isb_GAL[i + 1];
 				_lost_isb_BDS[i] = _lost_isb_BDS[i + 1];
 				_lost_isb_GLO[i] = _lost_isb_GLO[i + 1];
+				_lost_isb_QZS[i] = _lost_isb_QZS[i + 1];
 			}
 
 		}
@@ -2972,6 +3075,7 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 	vector<vector<int>> isb_gal_para_col_index;
 	vector<vector<int>> isb_bds_para_col_index;
 	vector<vector<int>> isb_glo_para_col_index;
+	vector<vector<int>> isb_qzs_para_col_index;
 	vector<vector<int>> amb_para_col_index;
 	vector<double*> parameter_blocks;
 
@@ -3103,6 +3207,24 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 		parameter_blocks.push_back(_para_ISB_GLO[_rover_count]);
 	}
 
+	if (!_lost_isb_QZS[_rover_count])
+	{
+		isb_num++;
+		vector<int> isb_qzs_i;
+		t_gpar par_isb_qzs;
+		par_isb_qzs.site = _site;
+		par_isb_qzs.parType = par_type::QZS_ISB;
+		par_isb_qzs.value(_para_ISB_QZS[_rover_count][0]);
+		par_isb_qzs.beg = _epoch;
+		par_isb_qzs.end = _epoch;
+		par_isb_qzs.index = 8 + isb_num;
+		_all_para_win.addParam(par_isb_qzs);
+		isb_qzs_i.push_back(7 + isb_num);
+		total_para_size++;
+		isb_qzs_para_col_index.push_back(isb_qzs_i);
+		parameter_blocks.push_back(_para_ISB_QZS[_rover_count]);
+	}
+
 	int amb_index_start = 8 + isb_num;
 	map<int, int> amb_col_id;
 	int amb_size = -1;
@@ -3215,6 +3337,21 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 				gnss_info->addResidualBlockInfo(residual_block_info, para_index);
 				add_gnss_obs_index();
 			}
+			else if (gsys == GSYS::QZS && !_lost_isb_QZS[_rover_count])
+			{
+				MultiPseudorangeIFINGFactor* pf = new MultiPseudorangeIFINGFactor(
+					if_iter.time, if_iter.site, params_temp, if_iter.satdata,
+					_gbias_model, freq_band1, freq_band2, lever);
+
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_QZS[_rover_count])] = isb_qzs_para_col_index[0];
+
+				GNSSResidualBlockInfo* residual_block_info =
+					new GNSSResidualBlockInfo(pf, loss_function,
+						vector<double*> { _para_pose[_rover_count], _para_CLK[_rover_count], _para_TRP[_rover_count], _para_ISB_QZS[_rover_count] });
+
+				gnss_info->addResidualBlockInfo(residual_block_info, para_index);
+				add_gnss_obs_index();
+			}
 		}
 
 		if (obstype == GOBSTYPE::TYPE_L)
@@ -3297,6 +3434,21 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 				gnss_info->addResidualBlockInfo(residual_block_info, para_index);
 				add_gnss_obs_index();
 			}
+			else if (gsys == GSYS::QZS && !_lost_isb_QZS[_rover_count])
+			{
+				MultiCarrierphaseIFINGFactor* lf = new MultiCarrierphaseIFINGFactor(
+					if_iter.time, if_iter.site, params_temp, if_iter.satdata,
+					_gbias_model, freq_band1, freq_band2, lever);
+
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_QZS[_rover_count])] = isb_qzs_para_col_index[0];
+
+				GNSSResidualBlockInfo* residual_block_info =
+					new GNSSResidualBlockInfo(lf, loss_function_CP,
+						vector<double*> { _para_pose[_rover_count], _para_CLK[_rover_count], _para_TRP[_rover_count], _para_ISB_QZS[_rover_count], _para_AMB_IF[amb_id] });
+
+				gnss_info->addResidualBlockInfo(residual_block_info, para_index);
+				add_gnss_obs_index();
+			}
 		}
 	}
 
@@ -3363,6 +3515,9 @@ void gfgomsf::t_gfgo_gins::_gins_posteriori_test_PPP(ceres::Problem& problem) {
 
 		if (!_lost_isb_GLO[_rover_count])
 			Qx(isb_glo_para_col_index[0][0], isb_glo_para_col_index[0][0]) = _sig_init_glo * _sig_init_glo;
+
+		if (!_lost_isb_QZS[_rover_count])
+			Qx(isb_qzs_para_col_index[0][0], isb_qzs_para_col_index[0][0]) = _sig_init_qzs * _sig_init_qzs;
 
 		for (int i = 0; i < amb_para_col_index.size(); i++)
 		{
@@ -3580,6 +3735,21 @@ void gfgomsf::t_gfgo_gins::_set_initial_value(const t_gtime& runEpoch) {
 			_lost_isb_GLO[_rover_count] = true;
 			_isb_GLO[_rover_count] = 0.0;
 		}
+
+		id = _param.getParam(_site, par_type::QZS_ISB, "");
+		if (id >= 0)
+		{
+			_lost_isb_QZS[_rover_count] = false;
+			if (_rover_count > 0)
+				_isb_QZS[_rover_count] = _isb_QZS[_rover_count - 1];
+			else
+				_isb_QZS[_rover_count] = _param[id].value();
+		}
+		else
+		{
+			_lost_isb_QZS[_rover_count] = true;
+			_isb_QZS[_rover_count] = 0.0;
+		}
 		// save the initial value for PPP/INS FGO priors
 		double epsilon = 1e-10;
 		if (fabs(_trp_ini) < epsilon)
@@ -3597,6 +3767,10 @@ void gfgomsf::t_gfgo_gins::_set_initial_value(const t_gtime& runEpoch) {
 		if (fabs(_isb_GLO_ini) < epsilon && !_lost_isb_GLO[_rover_count])
 		{
 			_isb_GLO_ini = _isb_GLO[_rover_count];
+		}
+		if (fabs(_isb_QZS_ini) < epsilon && !_lost_isb_QZS[_rover_count])
+		{
+			_isb_QZS_ini = _isb_QZS[_rover_count];
 		}
 	}
 	if (_isBase)
@@ -3860,9 +4034,11 @@ void gfgomsf::t_gfgo_gins::clearGNSSmsg()
             _isb_GAL[i] = 0.0;
             _isb_BDS[i] = 0.0;
 			_isb_GLO[i] = 0.0;
+            _isb_QZS[i] = 0.0;
             _lost_isb_GAL[i] = false;
             _lost_isb_BDS[i] = false;
 			_lost_isb_GLO[i] = false;
+            _lost_isb_QZS[i] = false;
         }
     }
 
@@ -3927,6 +4103,7 @@ void gfgomsf::t_gfgo_gins::clearGNSSmsg()
         memset(_para_ISB_GAL, 0, sizeof(_para_ISB_GAL));
         memset(_para_ISB_BDS, 0, sizeof(_para_ISB_BDS));
 		memset(_para_ISB_GLO, 0, sizeof(_para_ISB_GLO));
+        memset(_para_ISB_QZS, 0, sizeof(_para_ISB_QZS));
         memset(_para_AMB_IF, 0, sizeof(_para_AMB_IF));
 
 
@@ -3935,6 +4112,7 @@ void gfgomsf::t_gfgo_gins::clearGNSSmsg()
      _isb_GAL_ini = 0.0;
      _isb_BDS_ini = 0.0;
 	 _isb_GLO_ini = 0.0;
+     _isb_QZS_ini = 0.0;
     }
 
     _initial_prior = true;

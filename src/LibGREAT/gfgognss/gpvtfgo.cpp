@@ -5311,6 +5311,8 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP()
                 problem.AddParameterBlock(_para_ISB_BDS[i], 1);
 			if (!_lost_isb_GLO[i])
 				problem.AddParameterBlock(_para_ISB_GLO[i], 1);
+			if (!_lost_isb_QZS[i])
+				problem.AddParameterBlock(_para_ISB_QZS[i], 1);
         }
 
         //Posterior Factor
@@ -5362,6 +5364,12 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP()
 				RandomWalkFactor* glof = new RandomWalkFactor(sqrt_info_glo);
 				problem.AddResidualBlock(glof, NULL, _para_ISB_GLO[i], _para_ISB_GLO[i + 1]);
 			}
+			if (!_lost_isb_QZS[i] && !_lost_isb_QZS[i + 1])
+			{
+				double sqrt_info_qzs = 1.0 / sqrt(graph_interval_random_walk_q(_qzsStoModel, graph_dt));
+				RandomWalkFactor* qzsf = new RandomWalkFactor(sqrt_info_qzs);
+				problem.AddResidualBlock(qzsf, NULL, _para_ISB_QZS[i], _para_ISB_QZS[i + 1]);
+			}
         }
         //ISB Initial Factor
         for (int i = 0; i <= _rover_count; i++)
@@ -5382,6 +5390,11 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP()
 			{
 				InitialFactor* iglof = new InitialFactor(0.0, 1.0 / _sig_init_glo);
 				problem.AddResidualBlock(iglof, NULL, _para_ISB_GLO[i]);
+			}
+			if (!_lost_isb_QZS[i])
+			{
+				InitialFactor* iqzsf = new InitialFactor(0.0, 1.0 / _sig_init_qzs);
+				problem.AddResidualBlock(iqzsf, NULL, _para_ISB_QZS[i]);
 			}
         }
         //Ambiguity Initial Factor
@@ -5443,6 +5456,11 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP()
 						MultiPseudorangeIFFactor* pf = new MultiPseudorangeIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
 						problem.AddResidualBlock(pf, loss_function, _para_CRD[i], _para_CLK[i], _para_TRP[i], _para_ISB_GLO[i]);
 					}
+					else if (gsys == GSYS::QZS && !_lost_isb_QZS[i])
+					{
+						MultiPseudorangeIFFactor* pf = new MultiPseudorangeIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
+						problem.AddResidualBlock(pf, loss_function, _para_CRD[i], _para_CLK[i], _para_TRP[i], _para_ISB_QZS[i]);
+					}
                     else
                     {
                         cerr << "not support the system now : " << gsys << endl;
@@ -5477,6 +5495,11 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP()
 					{
 						MultiCarrierphaseIFFactor* lf = new MultiCarrierphaseIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
 						problem.AddResidualBlock(lf, loss_function_CP, _para_CRD[i], _para_CLK[i], _para_TRP[i], _para_ISB_GLO[i], _para_AMB_IF[id]);
+					}
+					else if (gsys == GSYS::QZS && !_lost_isb_QZS[i])
+					{
+						MultiCarrierphaseIFFactor* lf = new MultiCarrierphaseIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
+						problem.AddResidualBlock(lf, loss_function_CP, _para_CRD[i], _para_CLK[i], _para_TRP[i], _para_ISB_QZS[i], _para_AMB_IF[id]);
 					}
                     else
                     {
@@ -6249,6 +6272,10 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP()
 				{
 					drop_set.push_back(i);
 				}
+				if (_last_gnss_marginalization_para_blocks[i] == _para_ISB_QZS[0])
+				{
+					drop_set.push_back(i);
+				}
             }
             MarginalizationGNSSFactor* marginalization_gnss_factor = new MarginalizationGNSSFactor(_last_gnss_marginalization_info);
             GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(marginalization_gnss_factor, NULL,
@@ -6283,6 +6310,13 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP()
 			double sqrt_info_glo = 1.0 / sqrt(graph_interval_random_walk_q(_gloStoModel, graph_dt));
 			RandomWalkFactor* glof = new RandomWalkFactor(s * sqrt_info_glo);
 			GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(glof, NULL, vector<double*> {_para_ISB_GLO[0], _para_ISB_GLO[1]}, drop_set);
+			gnss_marginalization_info->addResidualBlockInfo(residual_block_info);
+		}
+		if (!_lost_isb_QZS[0] && !_lost_isb_QZS[1])
+		{
+			double sqrt_info_qzs = 1.0 / sqrt(graph_interval_random_walk_q(_qzsStoModel, graph_dt));
+			RandomWalkFactor* qzsf = new RandomWalkFactor(s * sqrt_info_qzs);
+			GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(qzsf, NULL, vector<double*> {_para_ISB_QZS[0], _para_ISB_QZS[1]}, drop_set);
 			gnss_marginalization_info->addResidualBlockInfo(residual_block_info);
 		}
 
@@ -6328,6 +6362,13 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP()
 							drop_set.push_back(3);
 							MultiPseudorangeIFFactor* pf = new MultiPseudorangeIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
 							GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(pf, loss_function, vector<double*> {_para_CRD[i], _para_CLK[i], _para_TRP[i], _para_ISB_GLO[i]}, drop_set);
+							gnss_marginalization_info->addResidualBlockInfo(residual_block_info);
+						}
+						else if (gsys == GSYS::QZS && !_lost_isb_QZS[i])
+						{
+							drop_set.push_back(3);
+							MultiPseudorangeIFFactor* pf = new MultiPseudorangeIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
+							GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(pf, loss_function, vector<double*> {_para_CRD[i], _para_CLK[i], _para_TRP[i], _para_ISB_QZS[i]}, drop_set);
 							gnss_marginalization_info->addResidualBlockInfo(residual_block_info);
 						}
                         else
@@ -6394,6 +6435,15 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP()
 								GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(lf, loss_function_CP, vector<double*> {_para_CRD[i], _para_CLK[i], _para_TRP[i], _para_ISB_GLO[i], _para_AMB_IF[amb_id]}, drop_set);
 								gnss_marginalization_info->addResidualBlockInfo(residual_block_info);
 							}
+							else if (gsys == GSYS::QZS && !_lost_isb_QZS[i])
+							{
+								drop_set.push_back(3);
+								if (drop_amb)
+									drop_set.push_back(4);
+								MultiCarrierphaseIFFactor* lf = new MultiCarrierphaseIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
+								GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(lf, loss_function_CP, vector<double*> {_para_CRD[i], _para_CLK[i], _para_TRP[i], _para_ISB_QZS[i], _para_AMB_IF[amb_id]}, drop_set);
+								gnss_marginalization_info->addResidualBlockInfo(residual_block_info);
+							}
                             else
                             {
                                 cerr << "not support the system now : " << gsys << endl;
@@ -6424,6 +6474,10 @@ void gfgomsf::t_gpvtfgo::_marginalization_PPP()
 		if (!_lost_isb_GLO[0] && !_lost_isb_GLO[1])
 		{
 			addr_shift[reinterpret_cast<ParameterBlockKey>(_para_ISB_GLO[1])] = _para_ISB_GLO[0];
+		}
+		if (!_lost_isb_QZS[0] && !_lost_isb_QZS[1])
+		{
+			addr_shift[reinterpret_cast<ParameterBlockKey>(_para_ISB_QZS[1])] = _para_ISB_QZS[0];
 		}
 
         vector<double*> parameter_blocks = gnss_marginalization_info->getParameterBlocks(addr_shift);
@@ -7604,6 +7658,7 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP(ceres::Problem& problem)
     vector<vector<int>> isb_gal_para_col_index;
     vector<vector<int>> isb_bds_para_col_index;
 	vector<vector<int>> isb_glo_para_col_index;
+    vector<vector<int>> isb_qzs_para_col_index;
     vector<vector<int>> amb_para_col_index;
     int total_para_size = 0;
 
@@ -7717,6 +7772,23 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP(ceres::Problem& problem)
 		isb_glo_para_col_index.push_back(isb_glo_i);
 		_parameter_blocks.push_back(_para_ISB_GLO[_rover_count]);
 	}
+	if (!_lost_isb_QZS[_rover_count])
+	{
+		isb_num++;
+		vector<int> isb_qzs_i;
+		t_gpar par_isb_qzs;
+		par_isb_qzs.site = _site;
+		par_isb_qzs.parType = par_type::QZS_ISB;
+		par_isb_qzs.value(_para_ISB_QZS[_rover_count][0]);
+		par_isb_qzs.beg = _epoch;
+		par_isb_qzs.end = _epoch;
+		par_isb_qzs.index = 5 + isb_num;
+		_all_para_win.addParam(par_isb_qzs);
+		isb_qzs_i.push_back(4 + isb_num);
+		total_para_size++;
+		isb_qzs_para_col_index.push_back(isb_qzs_i);
+		_parameter_blocks.push_back(_para_ISB_QZS[_rover_count]);
+	}
 
     int amb_index_start = 5 + isb_num;
     map<int, int> amb_col_id;
@@ -7763,6 +7835,13 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP(ceres::Problem& problem)
 				MultiPseudorangeIFFactor* pf = new MultiPseudorangeIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
 				GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(pf, loss_function, vector<double*> {_para_CRD[_rover_count], _para_CLK[_rover_count], _para_TRP[_rover_count], _para_ISB_GLO[_rover_count]});
 				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_GLO[_rover_count])] = isb_glo_para_col_index[0];
+				gnss_info->addResidualBlockInfo(residual_block_info, para_index);
+			}
+			else if (gsys == GSYS::QZS && !_lost_isb_QZS[_rover_count])
+			{
+				MultiPseudorangeIFFactor* pf = new MultiPseudorangeIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
+				GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(pf, loss_function, vector<double*> {_para_CRD[_rover_count], _para_CLK[_rover_count], _para_TRP[_rover_count], _para_ISB_QZS[_rover_count]});
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_QZS[_rover_count])] = isb_qzs_para_col_index[0];
 				gnss_info->addResidualBlockInfo(residual_block_info, para_index);
 			}
             else
@@ -7822,6 +7901,13 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP(ceres::Problem& problem)
 				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_GLO[_rover_count])] = isb_glo_para_col_index[0];
 				gnss_info->addResidualBlockInfo(residual_block_info, para_index);
 			}
+			else if (gsys == GSYS::QZS && !_lost_isb_QZS[_rover_count])
+			{
+				MultiCarrierphaseIFFactor* lf = new MultiCarrierphaseIFFactor(if_iter.time, if_iter.site, params_temp, if_iter.satdata, _gbias_model, freq_band1, freq_band2);
+				GNSSResidualBlockInfo* residual_block_info = new GNSSResidualBlockInfo(lf, loss_function_CP, vector<double*> {_para_CRD[_rover_count], _para_CLK[_rover_count], _para_TRP[_rover_count], _para_ISB_QZS[_rover_count], _para_AMB_IF[amb_id]});
+				para_index[reinterpret_cast<ParameterBlockKey>(_para_ISB_QZS[_rover_count])] = isb_qzs_para_col_index[0];
+				gnss_info->addResidualBlockInfo(residual_block_info, para_index);
+			}
             else
             {
                 cerr << "not support the system now : " << gsys << endl;
@@ -7879,6 +7965,11 @@ void gfgomsf::t_gpvtfgo::_posteriori_test_PPP(ceres::Problem& problem)
 		{
 			int id = isb_glo_para_col_index[i][0];
 			Qx(id, id) = _sig_init_glo * _sig_init_glo;
+		}
+		for (int i = 0; i < isb_qzs_para_col_index.size(); i++)
+		{
+			int id = isb_qzs_para_col_index[i][0];
+			Qx(id, id) = _sig_init_qzs * _sig_init_qzs;
 		}
         for (int i = 0; i < amb_para_col_index.size(); i++)
         {

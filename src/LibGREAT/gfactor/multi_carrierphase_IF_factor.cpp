@@ -107,6 +107,18 @@ void gfgo::MultiCarrierphaseIFFactor::updatePara(t_gallpar & params_tmp, const E
 			cerr << "can not update ISB for sat : " << sat << endl;
 		}
 	}
+	else if (sys == GSYS::QZS)
+	{
+		i = params_tmp.getParam(_site, par_type::QZS_ISB, "");
+		if (i >= 0)
+		{
+			params_tmp[i].value(ISB);
+		}
+		else
+		{
+			cerr << "can not update ISB for sat : " << sat << endl;
+		}
+	}
 	else
 	{
 		cerr << "not support the system now : " << sys << endl;
