@@ -12,7 +12,6 @@ Example:
     --site GODN \
     --reference 1130760.6931 -4831298.6759 3994155.1990 \
     --nominal-start-sow 259200 \
-    --case NONE=sample_data/.../GODN-NONE.fgo \
     --case PARAMETER=sample_data/.../GODN-PARAMETER.fgo \
     --case CONSTRAINT=sample_data/.../GODN-CONSTRAINT.fgo \
     --baseline sample_data/.../GODN-FLT.flt \

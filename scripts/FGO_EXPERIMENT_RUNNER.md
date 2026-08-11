@@ -38,7 +38,7 @@ bias product. It can be set explicitly with `--work-dir NAME=DIR`.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_fgo_experiments.py run `
-  --case UPD_FF_NONE=build\parallel30\UPD_NONE.xml `
+  --case UPD_FF_PARAMETER=build\parallel30\UPD_PARAMETER.xml `
   --reference GODN=1130760.6931,-4831298.6759,3994155.1990 `
   --timeout-seconds 300
 ```
@@ -76,7 +76,7 @@ The important manifest fields are:
   },
   "experiments": [
     {
-      "name": "UPD_DF_NONE",
+      "name": "UPD_DF_PARAMETER",
       "config": "path/to/unique-output-config.xml",
       "workdir": "../sample_data/PPPFLT_2023305",
       "tags": {"frequency_set": "DF"}

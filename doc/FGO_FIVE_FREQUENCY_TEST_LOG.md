@@ -145,8 +145,8 @@
 ### 阶段 4：固定结果反馈到因子图（NONE / PARAMETER / CONSTRAINT 三模式）
 
 - 输入提交：`df67f88 fix(fgo): load Bias-SINEX safely on 64-bit` 之后的待提交工作集。
-- 目标：把上一阶段"只写 FLT 条件解、图仍全 Float"的缺口补上，让整周固定结果真正反馈进 Ceres 因子图。新增可配置反馈模式 `<fgo><ambiguity_feedback_mode>`（`NONE` / `PARAMETER` / `CONSTRAINT`），三种模式仅作用于固定阶段，浮点估计完全共用。
-- 配置解析：`t_gsetfgo::ambiguity_feedback_mode()` 读取 `<fgo><ambiguity_feedback_mode>` 并做大小写归一；未知值抛出 `std::invalid_argument`。`GREAT_PVTFGO` 与 `GREAT_GINSFGO` 两个入口在启动时立即校验该配置，非法值快速失败（打印配置错误并返回 1），避免"退出码 0、固定模式未生效"的静默退化。
+- 目标：把上一阶段"只写 FLT 条件解、图仍全 Float"的缺口补上，让整周固定结果真正反馈进 Ceres 因子图。旧版本曾提供三态反馈开关（`NONE` / `PARAMETER` / `CONSTRAINT`），三种模式仅作用于固定阶段，浮点估计完全共用。
+- 配置解析：旧版本的三态开关读取并做大小写归一；未知值抛出 `std::invalid_argument`。`GREAT_PVTFGO` 与 `GREAT_GINSFGO` 两个入口在启动时立即校验该配置，非法值快速失败（打印配置错误并返回 1），避免"退出码 0、固定模式未生效"的静默退化。
 - FLT 侧导出（`gambfix/t_gambiguity`）：`t_gambiguity::_addFixConstraint()` 把每条被接受的 NL 绝对双差方程写入 `FixedAmbiguityConstraint`（两端参数索引、卫星、类型、系数 `Ba/Bb`、目标整数、信息量），放入 `_pending_fixed_constraints`；`processBatch()` 在条件更新前调用 `_validateFixedConstraints()` 复核全部导出方程，任一出错（非有限、系数为零、参数越界或残差超容差 `max(1e-6, 10/sqrt(info))`）则回退到 `fltpreAMB` 并拒绝本次候选。只有通过校验后 `_pending` 才转为 `_fixed_constraints`，并 commit 固定历史（`_DD_previous`、连续固定计数），保证被拒绝的候选不会污染后续参考星选取和连续计数。另新增 `_amb_fixed=false` 时代理恢复与约束向量清空。
 - 图侧消费（`t_gpfgo`）：新增 `RawFixedConstraint` 与 `fixed_ambiguity_factor.h` 中 Ceres `FixedAmbiguityFactor`（绝对方程 `ca*a + cb*b = target`，权重为 `sqrt_information`）。
   - `NONE`：维持旧行为，仅写条件 FLT，图不反馈。
@@ -268,7 +268,7 @@
 
 ### IFB 后续独立复核：坐标约定与 OSB 性能（2026-08-08）
 
-> 本节不直接沿用前文结论；重新运行双站两小时算例，并以 SINEX `SOLUTION/ESTIMATE` 的测站标志坐标、新日志和实际输出为依据。本轮配置未写 `ambiguity_feedback_mode`，因此使用兼容默认 `NONE`：`.fgo` 是图浮点解，`.flt` 是传统条件固定解。
+> 本节不直接沿用前文结论；重新运行双站两小时算例，并以 SINEX `SOLUTION/ESTIMATE` 的测站标志坐标、新日志和实际输出为依据。本轮历史配置未启用图反馈，因此 `.fgo` 是图浮点解，`.flt` 是传统条件固定解。
 
 #### 坐标约定缺陷与修正
 
@@ -807,3 +807,85 @@ UPD T1/T4 共有 60 个历元，Fixed/Float 状态全部一致，3D 坐标差 RM
 
 随后复核又补充了非有限 SOW 拒绝、状态字符串规范化、非整周期分析时长的网格计算，
 以及零向量/极点真值坐标的输入保护；`compare_fgo_solutions.py` 同步采用相同解析和状态定义。
+
+## 全天双频/五频 FGO 与滤波矩阵（2026-08-11）
+
+### 测试范围与配置核查
+
+- 使用 Release 构建 `build/Bin/Release/GREAT_PVT.exe`，源码提交为 `8a45a6eca6ffd330a08ea98a90f5b43933a6c731`（工作树当时有未提交文件）；可执行文件 SHA-256 为 `b63e4852852f109576a21e40c88a6f16c3a42053c85741205d482b977f3b0b52`。
+- 全天窗口为 `2023-11-01 00:00:00--23:59:30`，间隔 `30 s`，每站应有 `2880` 个历元；测站为 `GODN/HARB`，系统为 `GPS/GAL/BDS/GLO`，输出首末 SOW 均为 `259200/345570`。
+- FGO 覆盖 `UPD/OSB × DF/FF × NONE/CONSTRAINT` 八组：DF 使用双频 `1 2`，FF 使用配置中的五频组合；每组两站共 `5760` 行。`NONE` 不反馈整数约束，整日保持 Float 是预期语义；`CONSTRAINT` 用于约束反馈对照。
+- 滤波（`est=FLT`）覆盖 `UPD/OSB × DF/FF` 四组，复用同一全天窗口、站点、频点和精密产品；每组两站各 `2880` 行。FGO runner 并发上限为 4，FLT 四进程并行启动，所有输出名按产品/频点/模式隔离。
+- 配置清单为 `build/full_day_tests_20260811/manifest.json`，派生 XML 位于 `build/full_day_tests_20260811/configs/`；RAW 观测组合为 `RAW_ALL`，最小卫星数为 5，FGO 求解线程为 4。
+
+### FGO 执行指标
+
+`build/fgo_runs/full_day_20260811/report.md` 判定 `8/8 PASSED`，矩阵墙钟 `5094.065 s`，聚合吞吐 `9.046 station epochs/s`；所有实验退出码为 0、两站输出均完整。
+
+| 实验 | 产品/频点/反馈 | 墙钟 s | Spent s | 峰值 RSS MB | 行数 | 行/s | 实时倍数 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `UPD_DF_NONE` | UPD/双频/NONE | 1260.128 | 1246.020 | 1302.969 | 5760 | 4.571 | 137.129 |
+| `UPD_DF_CONSTRAINT` | UPD/双频/CONSTRAINT | 1804.242 | 1790.160 | 1342.691 | 5760 | 3.192 | 95.774 |
+| `UPD_FF_NONE` | UPD/五频/NONE | 2452.910 | 2439.050 | 1514.488 | 5760 | 2.348 | 70.447 |
+| `UPD_FF_CONSTRAINT` | UPD/五频/CONSTRAINT | 3102.071 | 3086.640 | 1550.703 | 5760 | 1.857 | 55.705 |
+| `OSB_DF_NONE` | OSB/双频/NONE | 913.193 | 897.426 | 1139.945 | 5760 | 6.308 | 189.226 |
+| `OSB_DF_CONSTRAINT` | OSB/双频/CONSTRAINT | 1282.985 | 1264.790 | 1168.688 | 5760 | 4.490 | 134.686 |
+| `OSB_FF_NONE` | OSB/五频/NONE | 2277.433 | 2259.650 | 1374.160 | 5760 | 2.529 | 75.875 |
+| `OSB_FF_CONSTRAINT` | OSB/五频/CONSTRAINT | 2636.476 | 2621.660 | 1422.461 | 5760 | 2.185 | 65.542 |
+
+下面的精度为分析器报告的永久收敛后统计，单位为 m；Fixed 为分析器同一统计窗口内的比例。
+
+| 站点 | 实验 | Fixed | 持续/永久 min | 3D RMS / MAE / P95 / P99 / max |
+|---|---|---:|---:|---:|
+| GODN | `UPD_DF_NONE` | 0.0% | 3.0 / 3.0 | 0.0234 / 0.0196 / 0.0427 / 0.0562 / 0.1481 |
+| GODN | `UPD_DF_CONSTRAINT` | 99.9% | 2.5 / 2.5 | 0.0242 / 0.0198 / 0.0427 / 0.0591 / 0.1268 |
+| GODN | `UPD_FF_NONE` | 0.0% | 3.0 / 3.0 | 0.0229 / 0.0192 / 0.0418 / 0.0568 / 0.1478 |
+| GODN | `UPD_FF_CONSTRAINT` | 99.9% | 1.0 / 1.0 | 0.0238 / 0.0193 / 0.0417 / 0.0605 / 0.1421 |
+| GODN | `OSB_DF_NONE` | 0.0% | 7.5 / 7.5 | 0.0221 / 0.0195 / 0.0388 / 0.0475 / 0.0787 |
+| GODN | `OSB_DF_CONSTRAINT` | 100.0% | 7.0 / 7.0 | 0.0223 / 0.0193 / 0.0401 / 0.0508 / 0.0966 |
+| GODN | `OSB_FF_NONE` | 0.0% | 7.5 / 7.5 | 0.0206 / 0.0179 / 0.0366 / 0.0467 / 0.0821 |
+| GODN | `OSB_FF_CONSTRAINT` | 100.0% | 0.5 / 0.5 | 0.0200 / 0.0172 / 0.0362 / 0.0480 / 0.0982 |
+| HARB | `UPD_DF_NONE` | 0.0% | 11.5 / 11.5 | 0.0171 / 0.0151 / 0.0284 / 0.0350 / 0.1004 |
+| HARB | `UPD_DF_CONSTRAINT` | 99.9% | 1.0 / 1.0 | 0.0166 / 0.0148 / 0.0280 / 0.0347 / 0.1031 |
+| HARB | `UPD_FF_NONE` | 0.0% | 10.0 / 10.0 | 0.0170 / 0.0151 / 0.0290 / 0.0345 / 0.0988 |
+| HARB | `UPD_FF_CONSTRAINT` | 99.9% | 1.0 / 1.0 | 0.0163 / 0.0147 / 0.0288 / 0.0338 / 0.0705 |
+| HARB | `OSB_DF_NONE` | 0.0% | 17.5 / 17.5 | 0.0195 / 0.0175 / 0.0320 / 0.0451 / 0.0929 |
+| HARB | `OSB_DF_CONSTRAINT` | 100.0% | 1.0 / 1.0 | 0.0194 / 0.0174 / 0.0321 / 0.0412 / 0.1438 |
+| HARB | `OSB_FF_NONE` | 0.0% | 14.5 / 14.5 | 0.0198 / 0.0178 / 0.0332 / 0.0409 / 0.1068 |
+| HARB | `OSB_FF_CONSTRAINT` | 99.9% | 1.0 / 1.0 | 0.0188 / 0.0171 / 0.0316 / 0.0368 / 0.0463 |
+
+### 滤波（FLT）执行与精度
+
+四个 FLT 进程均退出 0；四组结果均为 `GODN/HARB=2880/2880`，无畸形行、非有限坐标、重复历元或时间缺口。四进程批次从 `16:18:35` 启动至 `16:41:33` 完成。
+
+| 实验 | 产品/频点 | 进程耗时 s | 两站行数 | 永久收敛后 Fixed | 持续/永久 min（GODN/HARB） |
+|---|---|---:|---|---:|---:|
+| `FLT_UPD_DF` | UPD/双频 | 482.753 | 2880/2880 | 99.7% / 99.7% | 2.5 / 9.0 |
+| `FLT_UPD_FF` | UPD/五频 | 1292.145 | 2880/2880 | 99.7% / 99.7% | 2.0 / 8.0 |
+| `FLT_OSB_DF` | OSB/双频 | 372.026 | 2880/2880 | 100.0% / 100.0% | 1.5 / 10.5 |
+| `FLT_OSB_FF` | OSB/五频 | 1377.490 | 2880/2880 | 100.0% / 100.0% | 0.5 / 13.0 |
+
+| 站点 | 实验 | 3D RMS / MAE / P95 / P99 / max（m） |
+|---|---|---:|
+| GODN | `FLT_UPD_DF` | 0.0198 / 0.0163 / 0.0376 / 0.0509 / 0.1771 |
+| GODN | `FLT_UPD_FF` | 0.0181 / 0.0155 / 0.0331 / 0.0421 / 0.0503 |
+| GODN | `FLT_OSB_DF` | 0.0217 / 0.0178 / 0.0415 / 0.0576 / 0.0831 |
+| GODN | `FLT_OSB_FF` | 0.0202 / 0.0169 / 0.0381 / 0.0524 / 0.0700 |
+| HARB | `FLT_UPD_DF` | 0.0135 / 0.0116 / 0.0248 / 0.0327 / 0.0526 |
+| HARB | `FLT_UPD_FF` | 0.0132 / 0.0116 / 0.0230 / 0.0294 / 0.0420 |
+| HARB | `FLT_OSB_DF` | 0.0154 / 0.0132 / 0.0286 / 0.0367 / 0.0595 |
+| HARB | `FLT_OSB_FF` | 0.0157 / 0.0133 / 0.0290 / 0.0389 / 0.0541 |
+
+### 异常与结论
+
+- 完整性门禁全部通过：FGO/FLT 所有站点均为 `2880/2880`、覆盖率 100%、`malformed=0`、`nonfinite=0`、`gap=0`；FGO runner 的 fatal 日志匹配为空，未发现 Ceres 失败、RAW 准备失败、秩亏、协方差伪逆、NaN/Inf、卫星数不足、周跳或离群点诊断。
+- 分析器记录的定位异常集中在收敛早期：FGO 的非零 `3D>0.1 m` 区间/跳变均落在约前 14.5 min 内；其中 GODN `UPD_DF_NONE` 有 2 个 3D 区间，`UPD_DF_CONSTRAINT` 有 6 个，`UPD_FF_NONE` 有 3 个，`UPD_FF_CONSTRAINT` 有 1 个；HARB `UPD_DF_NONE`、`UPD_DF_CONSTRAINT`、`OSB_DF_CONSTRAINT`、`OSB_FF_NONE` 各有 1 个 3D 区间。FGO 的跳变告警为 GODN `OSB_DF_CONSTRAINT=1`、`OSB_FF_CONSTRAINT=2`，HARB `UPD_DF_CONSTRAINT=1`、`OSB_DF_CONSTRAINT=2`，详见两站分析 JSON/Markdown。
+- FLT 仅发现 GODN `FLT_UPD_DF` 在 SOW `259380` 的 1 个收敛后 3D 异常（最大 `0.1771 m`）及两次相邻跳变（`0.1585/0.1419 m`）；其余 FLT 组合收敛后无 3D 超限或跳变。
+- 每个全天日志有 1 条 SP3 `unknown record`。UPD 日志每次有 519 条 ATX 未定义频率码（`I09=9/R04=281/R06=229`），OSB 日志每次有 520 条（`I09=9/R04=279/R06=232`）；这些是输入 ATX 中未采用频率码的已知告警，未造成结果缺口。每个 FLT stderr 还出现 1 条启动阶段 `Incomplete command-line argument`，进程仍退出 0 且输出完整，列为非阻断告警。
+- 结论：本次全天双频、五频、FGO、滤波及 UPD/OSB/NONE/CONSTRAINT 矩阵均已实际完成；结果完整性和程序稳定性通过。后续若要作为严格验收，应针对上述收敛早期 3D/跳变区间设置 `fail_on_gate` 或逐历元复核，而不能只看进程退出码。
+
+### 可复核产物
+
+- FGO 状态/汇报：`build/fgo_runs/full_day_20260811/state.json`、`build/fgo_runs/full_day_20260811/report.md`；两站分析：`build/fgo_runs/full_day_20260811/analysis/`。
+- FLT 状态/汇报：`build/full_day_tests_20260811/flt_runs/state.json`、`build/full_day_tests_20260811/flt_runs/report.md`；两站分析：`build/full_day_tests_20260811/analysis/FLT_GODN.{md,json}`、`FLT_HARB.{md,json}`。
+- 配置和运行日志：`build/full_day_tests_20260811/configs/`、`build/full_day_tests_20260811/flt_runs/logs/` 以及 `sample_data/PPPFLT_2023305*/FULLDAY_*.log`。

@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GREAT-PIFGO / GREAT_PVT PPP configuration template.
+
+  使用方法：复制本文件后，先替换所有路径、时间、测站和卫星列表，再运行
+  GREAT_PVT -x <your-config.xml>。路径默认相对程序工作目录；也可以使用
+  file:// 或其他项目支持的 URI。数值单位写在对应注释中。
+
+  当前 PPP 应用的有限选项以源码实际解析值为准：
+  FGO/FLT、UPD/OSB、模糊度约束因子 true/false、IONO_FREE/RAW_ALL/RAW_MIX、
+  SEARCH/NO 等。RAW_MIX 当前被 FGO PPP 明确拒绝，请使用 RAW_ALL 或 IONO_FREE。
+-->
+<config thin="false"> <!-- thin=true 可减少输入/输出精度；通常保持 false。 -->
+
+  <!--
+    gen：处理时间、采样、卫星系统和估计器。
+    est 可选：FLT=传统滤波；FGO=因子图优化。
+    sys 可选系统：GPS、GLO、GAL、BDS、QZS、SBS、IRN；在此列出的系统才会处理。
+    rec 是本配置处理的测站 ID，通常为 RINEX 四字符站名，可写多个。
+    sat_rm 是要从全局卫星集合中排除的 PRN，可留空。
+  -->
+  <gen>
+    <beg>2023-11-01 00:00:00</beg> <!-- 起始时刻，GPS/RINEX 时间格式 YYYY-MM-DD HH:MM:SS。 -->
+    <end>2023-11-01 23:59:30</end> <!-- 结束时刻；配置范围通常按包含端点处理。 -->
+    <int>30</int> <!-- 采样间隔，单位 s；30 表示 30 秒采样。支持小数高频采样。 -->
+    <sys>GPS GAL BDS GLO</sys> <!-- 有限集合：GPS/GLO/GAL/BDS/QZS/SBS/IRN；可用 -SYS 排除系统。 -->
+    <rec>SITE</rec> <!-- 测站 ID，可写多个，例如 HARB GODN。必须与 RINEX/receiver 配置一致。 -->
+    <est>FGO</est> <!-- 有限选项：FGO=因子图；FLT=滤波。大小写通常会归一化。 -->
+    <!-- <base>BASE</base> --> <!-- RTK 基站列表；PPP 通常不设置。 -->
+    <!-- <rover>SITE</rover> --> <!-- RTK/组合模式流动站列表；PPP 可省略。 -->
+    <sat_rm></sat_rm> <!-- 要排除的 PRN，空值表示不额外排除。 -->
+  </gen>
+
+  <!--
+    fgo：FGO 和 GNSS 因子图选项。IMU/lidar/camera 选项保留在模板中，
+    但 PPP 运行只应保持 gnss_enable=1、imu/lidar/loop/num_of_cam 为 0。
+    线程数影响 Ceres/RAW 求解；窗口长度必须不超过编译时容量。
+  -->
+  <fgo>
+    <gnss_enable>1</gnss_enable> <!-- 0/1：是否加入 GNSS 因子；PPP FGO 必须为 1。 -->
+    <imu_enable>0</imu_enable> <!-- 0/非0：是否加入 IMU；PPP 不使用时保持 0。 -->
+    <lidar_enable>0</lidar_enable> <!-- 0/非0：是否加入 lidar；PPP 不使用时保持 0。 -->
+    <loop_enable>0</loop_enable> <!-- 0/非0：是否启用回环因子；PPP 不使用时保持 0。 -->
+    <num_of_cam>0</num_of_cam> <!-- 0=不使用相机；正数=相机数量。 -->
+    <amb_propagation>1</amb_propagation> <!-- 0/1：是否跨滑窗传播连续模糊度状态。 -->
+    <gnss_window_size>2</gnss_window_size> <!-- GNSS FGO 活动窗口节点数；正整数，受编译容量限制。 -->
+    <window_size>10</window_size> <!-- 通用 FGO 窗口；GNSS PPP 主要使用 gnss_window_size。 -->
+    <gins_window_size>10</gins_window_size> <!-- GINS 窗口；PPP 不使用但保留完整配置。 -->
+    <gnss_num_threads>2</gnss_num_threads> <!-- GNSS 求解线程数；<=0 表示单线程，建议按 CPU/矩阵并发调整。 -->
+    <max_solver_time>0.08</max_solver_time> <!-- 单次 Ceres 求解时间上限，单位 s；0 使用程序默认值。 -->
+    <max_num_iterations>10</max_num_iterations> <!-- Ceres 最大迭代次数；正整数。 -->
+    <relative_pos_var>0.1</relative_pos_var> <!-- 相邻节点相对位置约束方差/权重参数，单位按实现定义。 -->
+    <relative_rot_var>0.001</relative_rot_var> <!-- 相邻节点相对姿态约束方差/权重参数，单位按实现定义。 -->
+    <ambiguity_fix_factor_enable>true</ambiguity_fix_factor_enable>
+    <!--
+      true  固定后保留模糊度约束因子，并参与后续优化/边缘化；
+      false 固定后仅条件化当前图参数，不保留显式固定因子。
+      该设置要求 process/ambiguity 已启用 RAW_ALL + SEARCH。
+    -->
+
+    <!-- 以下为非 GNSS PPP 的可选传感器噪声参数；不使用相应传感器时可保持默认值。 -->
+    <acc_n>0.05</acc_n> <!-- IMU 加速度测量噪声标准差。 -->
+    <acc_w>0.001</acc_w> <!-- IMU 加速度偏置随机游走噪声。 -->
+    <gyr_n>0.005</gyr_n> <!-- IMU 角速度测量噪声标准差。 -->
+    <gyr_w>0.0001</gyr_w> <!-- IMU 陀螺偏置随机游走噪声。 -->
+    <gravity_norm>9.81</gravity_norm> <!-- 重力大小，单位 m/s^2。 -->
+    <pixel_error>15</pixel_error> <!-- 相机像素观测噪声，单位 pixel。 -->
+    <laser_cloud_error>1</laser_cloud_error> <!-- lidar 点云观测噪声，单位按点云模型定义。 -->
+    <estimate_extrinsic>0</estimate_extrinsic> <!-- 0/非0：是否估计相机-IMU 外参。 -->
+    <estimate_td>0</estimate_td> <!-- 0/非0：是否估计传感器时间延迟。 -->
+  </fgo>
+
+  <!--
+    inputs：输入产品。一个节点内可写多个空白分隔文件。
+    chk_nav：是否检查导航数据健康；chk_health：是否检查卫星健康标志。
+    RINEXO/RINEXN/RINEXC/SP3/DE/ATX/BLQ/EOP/BIAS/UPD/IFCB/LEAPSECOND
+    是当前 PPP 应用支持的输入格式；IMU 仅供组合传感器应用使用。
+  -->
+  <inputs chk_nav="true" chk_health="true">
+    <rinexo>obs\SITE.23o</rinexo> <!-- RINEX 观测文件，可写多个测站文件。 -->
+    <rinexn>gnss\brdc0000.23p</rinexn> <!-- 广播星历/导航文件。 -->
+    <rinexc>gnss\precise.clk</rinexc> <!-- 精密卫星钟差文件，通常为 RINEX CLK。 -->
+    <sp3>gnss\precise.sp3</sp3> <!-- 精密卫星轨道文件。 -->
+    <de>model\jpleph_de405_great</de> <!-- 行星星历文件；潮汐/太阳月球模型使用。 -->
+    <atx>model\igs20.atx</atx> <!-- 天线相位中心/偏差文件。 -->
+    <blq>model\oceanload</blq> <!-- 海潮负荷文件。 -->
+    <eop>model\poleut1</eop> <!-- 地球自转参数/ERP 文件。 -->
+    <bias>gnss\satellite_bias.bsx</bias> <!-- DCB/BSX 卫星码偏差文件。 -->
+    <ifcb>gnss\ifcb_file</ifcb> <!-- 可选 IFCB 产品；三频/多频模型需要时填写。 -->
+    <upd> <!-- UPD/OSB 产品；按产品类型和系统写多个文件。 -->
+      upd\upd_wl_G upd\upd_wl_E upd\upd_wl_C
+      upd\upd_nl_G upd\upd_nl_E upd\upd_nl_C
+      upd\upd_ewl_G upd\upd_ewl_E upd\upd_ewl_C
+      upd\upd_ewl24_E upd\upd_ewl24_C
+      upd\upd_ewl25_E upd\upd_ewl25_C
+    </upd>
+    <!-- <leapsecond>model\leapsecond.dat</leapsecond> --> <!-- 可选闰秒文件。 -->
+    <!-- <imu>imu\SITE.imu</imu> --> <!-- 组合 IMU 输入；仅启用 IMU 时填写。 -->
+  </inputs>
+
+  <!--
+    outputs：输出文件。
+    append=false 覆盖写，true 追加写；verb 是旧式输出详细程度。
+    log type 有限选项：CONSOLE=控制台、BASIC=文件/基础日志。
+    level 有限选项：OFF、CRITICAL、ERROR、WARN、INFO、DEBUG、TRACE。
+    输出格式：LOG、PPP、FLT、FGO、FGO_AR、RATIO；FGO_AR 是可选旧式独立 AR 文件。
+    当前统一结果建议保留 .fgo；不要在多个并发实验中复用同一路径。
+  -->
+  <outputs append="false" verb="0">
+    <log type="BASIC" name="result\SITE.log" level="INFO"
+         pattern="[%Y-%m-%d %H:%M:%S] [%l] %v" />
+    <ppp>result\SITE.ppp.log</ppp> <!-- PPP 诊断日志路径。 -->
+    <flt>result\SITE.flt</flt> <!-- 滤波/Float-Fixed 结果文件；FLT 流程必需。 -->
+    <fgo>result\SITE.fgo</fgo> <!-- FGO 统一结果坐标文件；FGO 流程必需。 -->
+    <!-- 输出节点可选 ver="版本字符串" 属性，用于选择对应文件格式版本；空缺表示默认版本。 -->
+    <!-- <fgo_ar>result\SITE.fgo.ar</fgo_ar> --> <!-- 可选：独立 AR 结果；统一 .fgo 时不需要。 -->
+    <ratio>result\SITE.ratio</ratio> <!-- Ratio/Bootstrapping 诊断文件，可选。 -->
+    <!-- <kml>result\SITE.kml</kml> --> <!-- 可选 KML；当前 PPP 主流程通常不输出。 -->
+  </outputs>
+
+  <!--
+    receiver：可选接收机元数据。每个 <rec> 的 id 应与 gen/rec 和 RINEX 测站一致。
+    X/Y/Z 为 ECEF(m)；也可用 LAT/LON/HSL（纬度/经度 deg、高程 m）提供坐标。
+    DX/DY/DZ 为 ECEF 偏心，DN/DE/DU 为本地 NEU 偏心；overwrite 为 0/1。
+    name、domes、rec、ant 是接收机/站点/天线标识。
+  -->
+  <receiver>
+    <rec id="SITE" name="SITE" domes="XXXXXXXXX"
+         rec="RECEIVER" ant="ANTENNA"
+         overwrite="false"
+         X="1130760.6931" Y="-4831298.6759" Z="3994155.1990"
+         DX="0" DY="0" DZ="0" DN="0" DE="0" DU="0" />
+    <!-- <rec id="SITE" LAT="0" LON="0" HSL="0" /> --> <!-- 用大地坐标替代 ECEF。 -->
+  </receiver>
+
+  <!--
+    GNSS 系统观测设置。
+    sigma_C/L/D 分别为码、相位、多普勒观测标准差；maxres_* 为相应残差上限。
+    sat 是 PRN 白名单；留空通常使用内置系统卫星集合。
+    band 是 RINEX 频段号，freq 是内部频率序号 FREQ_1..FREQ_5；两者按顺序对应。
+    常见 band：GPS=1/2/5，GLO=1/2，GAL=1/5/6/7/8，BDS=1/2/5/6/7/8/9，
+    QZS=1/2/5/6，SBS=1/5，IRN=5。实际可用频段必须同时存在于观测文件。
+  -->
+  <gps sigma_C="0.6" sigma_L="0.01" sigma_D="0.04"
+       maxres_C="10" maxres_L="0.08" maxres_D="0.1">
+    <sat>G01 G02 G03 G04 G05 G06 G07 G08 G09 G10 G11 G12 G13 G14 G15 G16 G17 G18 G19 G20 G21 G22 G23 G24 G25 G26 G27 G28 G29 G30 G31 G32</sat>
+    <band>1 2 5</band> <!-- GPS L1/L2/L5。 -->
+    <freq>1 2 3</freq> <!-- 内部频率序号；五频配置不意味着 GPS 有五个实际频段。 -->
+  </gps>
+
+  <glo sigma_C="0.6" sigma_L="0.01" sigma_D="0.08"
+       maxres_C="15" maxres_L="0.08" maxres_D="0.1">
+    <sat>R01 R02 R03 R04 R05 R06 R07 R08 R09 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24</sat>
+    <band>1 2</band> <!-- GLONASS G1/G2；CDMA 频段需由实际 RINEX 和模型支持。 -->
+    <freq>1 2</freq>
+  </glo>
+
+  <gal sigma_C="0.6" sigma_L="0.01" sigma_D="0.06"
+       maxres_C="15" maxres_L="0.08" maxres_D="0.1">
+    <sat>E01 E02 E03 E04 E05 E06 E07 E08 E09 E10 E11 E12 E13 E14 E15 E16 E17 E18 E19 E20 E21 E22 E23 E24 E25 E26 E27 E28 E29 E30 E31 E32 E33 E34 E35 E36</sat>
+    <band>1 5 7 8 6</band> <!-- Galileo E1/E5a/E5b/E5a+b/E6。 -->
+    <freq>1 2 3 4 5</freq>
+  </gal>
+
+  <bds sigma_C="0.6" sigma_L="0.01" sigma_D="0.06"
+       maxres_C="15" maxres_L="0.08" maxres_D="0.1">
+    <sat>C06 C07 C08 C09 C10 C11 C12 C13 C14 C15 C16 C17 C18 C19 C20 C21 C22 C23 C24 C25 C26 C27 C28 C29 C30 C31 C32 C33 C34 C35 C36 C37 C38 C39 C41 C42 C43 C44 C45 C46</sat>
+    <band>2 6 5 8 9</band> <!-- B1I/B3I/B2a/B2/B2b；按 RINEX 实际信号确认。 -->
+    <freq>1 2 3 4 5</freq>
+  </bds>
+
+  <qzs sigma_C="0.6" sigma_L="0.01" sigma_D="0.06"
+       maxres_C="15" maxres_L="0.08" maxres_D="0.1">
+    <sat>J01 J02 J03 J04</sat>
+    <band>1 2 5 6</band> <!-- QZSS L1/L2/L5/L6；没有相应观测时删去频段。 -->
+    <freq>1 2 3 4</freq>
+  </qzs>
+
+  <sbs sigma_C="0.6" sigma_L="0.01" sigma_D="0.06"
+       maxres_C="15" maxres_L="0.08" maxres_D="0.1">
+    <sat>S20 S24 S25 S26 S27 S28 S29</sat>
+    <band>1 5</band> <!-- SBAS L1/L5。 -->
+    <freq>1 2</freq>
+  </sbs>
+
+  <irn sigma_C="0.6" sigma_L="0.01" sigma_D="0.06"
+       maxres_C="15" maxres_L="0.08" maxres_D="0.1">
+    <sat>I01</sat>
+    <band>5</band> <!-- IRNSS/NavIC L5。 -->
+    <freq>1</freq>
+  </irn>
+
+  <!--
+    process：PPP 观测模型和初值。
+    所有 true/false 选项均接受布尔文本；数值单位见注释。
+  -->
+  <process>
+    <phase>true</phase> <!-- true/false：是否使用载波相位观测。 -->
+    <doppler>false</doppler> <!-- true/false：是否使用多普勒观测。 -->
+    <tropo>true</tropo> <!-- true/false：是否估计对流层 ZTD。 -->
+    <tropo_slant>false</tropo_slant> <!-- true/false：是否估计斜向对流层延迟。 -->
+    <gradient>false</gradient> <!-- true/false：是否估计水平对流层梯度。 -->
+    <iono>true</iono> <!-- true/false：是否估计电离层参数；RAW_ALL 通常需要。 -->
+    <ion_model>SION</ion_model> <!-- 有限选项：VION=垂直电离层；SION=斜向电离层；空/其他=默认。 -->
+    <tropo_model>SAASTAMOINEN</tropo_model> <!-- SAASTAMOINEN/DAVIS/HOPFIELD/EXTERN。 -->
+    <tropo_mf>GMF</tropo_mf> <!-- COSZ/GMF/NO_MF：ZTD 映射函数。 -->
+    <iono_mf>QFAC</iono_mf> <!-- COSZ/QFAC/NONE：电离层映射函数。 -->
+    <grad_mf>TILTING</grad_mf> <!-- TILTING/CHEN_HERRING/BAR_SEVER：梯度映射函数。 -->
+    <sig_init_crd>30</sig_init_crd> <!-- 初始坐标标准差，m。 -->
+    <sig_init_vel>10</sig_init_vel> <!-- 初始速度标准差，m/s。 -->
+    <sig_init_ztd>10</sig_init_ztd> <!-- 初始 ZTD 标准差，m。 -->
+    <sig_init_grd>10</sig_init_grd> <!-- 初始对流层梯度标准差，m。 -->
+    <sig_init_amb>30</sig_init_amb> <!-- 初始模糊度标准差，m。 -->
+    <sig_init_vion>100</sig_init_vion> <!-- 初始 VION/SION 标准差，m。 -->
+    <sig_init_glo>10</sig_init_glo> <!-- GLONASS ISB/IFB 初始标准差。 -->
+    <sig_init_gal>10</sig_init_gal> <!-- Galileo ISB/IFB 初始标准差。 -->
+    <sig_init_bds>10</sig_init_bds> <!-- BDS ISB/IFB 初始标准差。 -->
+    <sig_init_qzs>10</sig_init_qzs> <!-- QZSS ISB/IFB 初始标准差。 -->
+    <minimum_elev>7</minimum_elev> <!-- 卫星截止高度角，单位 deg。 -->
+    <max_res_norm>3</max_res_norm> <!-- 归一化后验残差阈值。 -->
+    <obs_combination>RAW_ALL</obs_combination> <!-- IONO_FREE=双频无电离层组合；RAW_ALL=未组合全频；RAW_MIX 当前 FGO 不支持。 -->
+    <crd_constr>EST</crd_constr> <!-- 有限选项：EST=估计坐标；KIN=运动坐标；FIX=固定坐标。 -->
+    <pos_kin>true</pos_kin> <!-- true/false：运动或静态接收机模式。 -->
+    <min_sat>5</min_sat> <!-- 最小可用卫星数；不足时跳过该历元。 -->
+    <obs_weight>SINEL</obs_weight> <!-- EQUAL/SINEL/SINEL2/SINEL4/PARTELE/SNR。 -->
+    <residuals>RES_NORM</residuals> <!-- RES_ORIG/RES_NORM/RES_ALL：输出残差类型。 -->
+    <ref_clk></ref_clk> <!-- 参考钟测站/卫星标识；空值表示默认。 -->
+    <attitudes>YAW_NOMI</attitudes> <!-- YAW_NOMI/YAW_RTCM：卫星姿态模型。 -->
+    <cbiaschar>ORIG</cbiaschar> <!-- ORIG/2CHAR/3CHAR：码偏差码型处理。 -->
+    <basepos>CFILE</basepos> <!-- CFILE/SPP：基站坐标来源；PPP 通常不生效。 -->
+    <sd_sat>false</sd_sat> <!-- true/false：是否使用卫星间单差。 -->
+    <ifcb_model>COR</ifcb_model> <!-- EST=估计 IFCB；COR=改正 IFCB；其他=默认。 -->
+    <bds_code_bias_corr>true</bds_code_bias_corr> <!-- true/false：是否改正 BDS code bias。 -->
+    <slip_model>default</slip_model> <!-- 当前实现有限选项：default；其他值回退 default。 -->
+    <frequency>2</frequency> <!-- 频率数，正整数；必须与每个启用系统的 freq/band 配置相容。 -->
+    <receiverType>DEF</receiverType> <!-- DEF/F9P/AND：接收机类型特化；一般使用 DEF。 -->
+    <mean_pole_model>CUBIC</mean_pole_model> <!-- 有限选项：LINEAR 或 CUBIC；默认使用 CUBIC。 -->
+  </process>
+
+  <!--
+    filter：FLT 状态噪声和随机游走参数。method_flt 有限选项：
+    kalman=普通 Kalman、srcf=平方根协方差滤波；默认推荐 srcf。
+    noise_* 为白噪声/初始噪声，rndwk_* 为随机游走强度，单位随状态定义。
+  -->
+  <filter method_flt="srcf"
+          noise_crd="100" noise_vel="1" noise_clk="1000" noise_dclk="100"
+          noise_vion="100"
+          rndwk_ztd="6" rndwk_vion="0" rndwk_grd="0" rndwk_amb="0"
+          rndwk_gps="20" rndwk_glo="20" rndwk_gal="20" rndwk_bds="20" rndwk_qzs="20"
+          reset_amb="0" reset_par="0" />
+  <!-- reset_amb/reset_par 为重置周期，单位 s；0 表示不按周期强制重置。 -->
+
+  <!--
+    ambiguity：legacy 模糊度固定器。
+    fix_mode：NO=只浮点；SEARCH=执行 EWL/WL/NL/LAMBDA 搜索。
+    upd_mode：UPD=卫星/系统 UPD；OSB=observable-specific bias 产品。
+  -->
+  <ambiguity>
+    <fix_mode>SEARCH</fix_mode> <!-- 有限选项：NO=不固定；SEARCH=执行模糊度搜索。 -->
+    <upd_mode>UPD</upd_mode> <!-- 有限选项：UPD 或 OSB。必须和输入产品一致。 -->
+    <part_fix>YES</part_fix> <!-- YES/NO：是否允许部分模糊度固定。 -->
+    <part_fix_num>4</part_fix_num> <!-- 部分固定的最小/目标方程数量，正整数。 -->
+    <full_fix_num>3</full_fix_num> <!-- 完整固定判定的最小方程数量，正整数。 -->
+    <ratio>2.0</ratio> <!-- LAMBDA ratio 门限；正数。具体可靠性需结合 boot/残差门禁。 -->
+    <boot>0</boot> <!-- Bootstrapping 门限/概率参数；0 表示不额外启用该门。 -->
+    <set_refsat>YES</set_refsat> <!-- YES/NO：是否选择并固定参考卫星。 -->
+    <min_common_time>1</min_common_time> <!-- 两条观测弧最小共同时间，单位 s。 -->
+    <extra_widelane_decision maxdev="0.07" maxsig="0.10" alpha="1000" />
+    <!-- EWL：maxdev=允许偏差、maxsig=最大 sigma，alpha=置信参数。 -->
+    <widelane_decision maxdev="0.25" maxsig="0.12" alpha="1000" />
+    <!-- WL：maxdev=允许偏差、maxsig=最大 sigma，alpha=置信参数。 -->
+    <narrowlane_decision maxdev="0.35" maxsig="0.12" alpha="1000" />
+    <!-- NL：maxdev=允许偏差、maxsig=最大 sigma，alpha=置信参数。 -->
+  </ambiguity>
+
+  <!--
+    fgomsf_sensors：仅在组合传感器程序中使用；GREAT_PVT PPP 可省略。
+    msf_type 当前解析：GNSS 或 GINS_TC；其他字符串会回退到 GINS_TC。
+  -->
+  <!-- <fgomsf_sensors> -->
+  <!--   <msf_type>GNSS</msf_type> --> <!-- GNSS=仅 GNSS；GINS_TC=GNSS/INS 紧耦合。 -->
+  <!--   <result_path>result\</result_path> --> <!-- 组合传感器结果目录。 -->
+  <!-- </fgomsf_sensors> -->
+
+</config>

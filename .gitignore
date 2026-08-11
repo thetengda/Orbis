@@ -12,4 +12,7 @@ vcpkg_installed/
 .vscode/
 .claude/
 .venv/
+__pycache__/
+*.py[cod]
 doc/
+scripts/code-count.json

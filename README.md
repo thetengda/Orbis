@@ -84,10 +84,10 @@ FGO 配置中的关键选择包括：
 - `estimator`：`FGO` 或 `FLT`。
 - `obs_combin`：`RAW_ALL` 或 `IONO_FREE`。
 - `fix_mode`：浮点或模糊度搜索固定。
-- `ambiguity_feedback_mode`：`NONE`、`PARAMETER` 或 `CONSTRAINT`。
+- `ambiguity_fix_factor_enable`：`true` 保留模糊度固定约束因子并参与后续图优化；`false` 仅条件化当前图参数，不保留显式约束因子。
 - `upd_mode`：按配置选择 UPD 或 OSB 产品。
 
-启用 FGO 模糊度反馈时，应使用 `RAW_ALL` 并同时启用模糊度固定。窗口大小、GNSS 窗口大小和 INS 窗口大小不能超过源码编译时的容量上限。
+启用 FGO 模糊度固定反馈时，应使用 `RAW_ALL` 并同时启用模糊度固定；`ambiguity_fix_factor_enable` 仅控制约束因子是否保留。窗口大小、GNSS 窗口大小和 INS 窗口大小不能超过源码编译时的容量上限。
 
 ## 实验与结果分析
 

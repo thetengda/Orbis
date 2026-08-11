@@ -265,7 +265,7 @@ namespace gfgomsf
 		bool _batch_remove = false;
 		bool _initial_prior = true;
 		std::unordered_map<ParameterBlockKey, int> amb_idx;
-		AMB_FEEDBACK_MODE _ambiguity_feedback_mode = AMB_FEEDBACK_MODE::NONE;
+		bool _ambiguity_fix_factor_enable = false;
 		bool _graph_ambiguity_fixed = false;
 		bool _raw_prior_contains_fixed_information = false;
 		std::unique_ptr<ceres::Problem> _raw_feedback_problem;

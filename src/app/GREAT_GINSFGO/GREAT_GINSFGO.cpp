@@ -36,7 +36,7 @@ int main(int argc, char** argv)
 	try
 	{
 		auto *fgo_settings = dynamic_cast<t_gsetfgo *>(&gset);
-		(void)fgo_settings->ambiguity_feedback_mode();
+		(void)fgo_settings->ambiguity_fix_factor_enable();
 		if (fgo_settings->window_size() > WINDOW_SIZE)
 			throw std::invalid_argument(
 				"fgo/window_size exceeds the compiled FGO window capacity");

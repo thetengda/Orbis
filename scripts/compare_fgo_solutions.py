@@ -17,11 +17,11 @@ Reports:
 Example:
 
   python scripts/compare_fgo_solutions.py --site GODN \
-    --a NONE=result/GODN-CODEX_RAWPAR2_UPD_NONE.fgo \
-    --b FLT=result/GODN-CODEX_RAWPAR2_UPD_NONE.flt \
+    --a PARAMETER=result/GODN-CODEX_RAWPAR2_UPD_PARAMETER.fgo \
+    --b FLT=result/GODN-CODEX_RAWPAR2_UPD_PARAMETER.flt \
     --reference 1130760.6931 -4831298.6759 3994155.1990 \
     --nominal-start-sow 259200 --interval 30 --hours 24 \
-    --markdown result/GODN-NONE-vs-FLT.md --json result/GODN-NONE-vs-FLT.json
+    --markdown result/GODN-PARAMETER-vs-FLT.md --json result/GODN-PARAMETER-vs-FLT.json
 """
 
 from __future__ import annotations

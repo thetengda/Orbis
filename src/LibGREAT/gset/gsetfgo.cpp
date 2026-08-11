@@ -461,23 +461,21 @@ namespace gfgo
 		}
 	}	
 
-	AMB_FEEDBACK_MODE t_gsetfgo::ambiguity_feedback_mode()
+	bool t_gsetfgo::ambiguity_fix_factor_enable()
 	{
 		std::lock_guard<t_gmutex> lock(_gmutex);
-		string mode = trim(_doc.child(XMLKEY_ROOT).child(XMLKEY_FGO)
-			.child_value("ambiguity_feedback_mode"));
+		string enabled = trim(_doc.child(XMLKEY_ROOT).child(XMLKEY_FGO)
+			.child_value("ambiguity_fix_factor_enable"));
 
-		std::transform(mode.begin(), mode.end(), mode.begin(),
+		std::transform(enabled.begin(), enabled.end(), enabled.begin(),
 			[](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-		if (mode.empty() || mode == "NONE")
-			return AMB_FEEDBACK_MODE::NONE;
-		if (mode == "PARAMETER")
-			return AMB_FEEDBACK_MODE::PARAMETER;
-		if (mode == "CONSTRAINT")
-			return AMB_FEEDBACK_MODE::CONSTRAINT;
+		if (enabled.empty() || enabled == "FALSE")
+			return false;
+		if (enabled == "TRUE")
+			return true;
 
 		throw std::invalid_argument(
-			"Unsupported <fgo><ambiguity_feedback_mode>: " + mode +
-			" (expected NONE, PARAMETER, or CONSTRAINT)");
+			"Unsupported <fgo><ambiguity_fix_factor_enable>: " + enabled +
+			" (expected true or false)");
 	}
 }

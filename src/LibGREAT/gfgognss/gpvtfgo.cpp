@@ -42,16 +42,6 @@ namespace
         return model_q * graph_dt / stochastic_dt;
     }
 
-	const char *ambiguity_feedback_mode_name(gfgo::AMB_FEEDBACK_MODE mode)
-    {
-        switch (mode)
-        {
-        case gfgo::AMB_FEEDBACK_MODE::PARAMETER: return "PARAMETER";
-        case gfgo::AMB_FEEDBACK_MODE::CONSTRAINT: return "CONSTRAINT";
-        default: return "NONE";
-        }
-    }
-
     // Steady-clock stopwatch used to measure per-window FGO phase durations.
     class FgoStopwatch
     {
@@ -123,15 +113,15 @@ t_gfgo_para(gset) {
 	{
 		auto *fgo_setting = dynamic_cast<t_gsetfgo *>(gset);
 		if (fgo_setting)
-			_ambiguity_feedback_mode = fgo_setting->ambiguity_feedback_mode();
-		if (_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE &&
+			_ambiguity_fix_factor_enable =
+				fgo_setting->ambiguity_fix_factor_enable();
+		if (_ambiguity_fix_factor_enable &&
 			(_observ != OBSCOMBIN::RAW_ALL || _fix_mode == FIX_MODE::NO))
 		{
 			if (_spdlog)
 				_spdlog->warn(
-					"PPP FGO ambiguity feedback {} requires RAW_ALL with ambiguity fixing enabled; using NONE",
-					ambiguity_feedback_mode_name(_ambiguity_feedback_mode));
-			_ambiguity_feedback_mode = AMB_FEEDBACK_MODE::NONE;
+					"PPP FGO ambiguity constraint factors require RAW_ALL with ambiguity fixing enabled; disabling ambiguity constraint factors");
+			_ambiguity_fix_factor_enable = false;
 		}
 	}
 	/*t_gbiasmodel *precise_bias(new t_gprecisebiasGPP(_allproc, _spdlog, gset));
@@ -146,15 +136,10 @@ t_gfgo_para(gset) {
 				"selected frequency, SION per satellite, and per-frequency ambiguities");
 			if (_fix_mode != FIX_MODE::NO)
 			{
-				if (_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::NONE)
-					_spdlog->info(
-						"PPP FGO RAW_ALL ambiguity fixing uses the FGO posterior "
-						"equation and the legacy WL/NL ambiguity resolver; graph "
-						"feedback mode is NONE");
-				else
-					_spdlog->info(
-						"PPP FGO RAW_ALL ambiguity feedback mode {} is enabled",
-						ambiguity_feedback_mode_name(_ambiguity_feedback_mode));
+				_spdlog->info(
+					"PPP FGO RAW_ALL ambiguity fixing graph feedback is enabled; "
+					"ambiguity constraint factors are {}",
+					_ambiguity_fix_factor_enable ? "retained" : "not retained");
 			}
 		}
 		else if (_observ == OBSCOMBIN::RAW_MIX)
@@ -293,8 +278,8 @@ t_gfgo_para(gset) {
 			<< " partial=" << (amb_setting->part_ambfix() ? "YES" : "NO");
 		if (amb_setting->part_ambfix())
 			_output_float_solution << " min_equations=" << amb_setting->part_ambfix_num();
-		_output_float_solution << " feedback="
-			<< ambiguity_feedback_mode_name(_ambiguity_feedback_mode) << endl;
+		_output_float_solution << " ambiguity_fix_factor_enable="
+			<< (_ambiguity_fix_factor_enable ? "TRUE" : "FALSE") << endl;
 		_output_float_solution << "# GNSS systems: ";
 		for (auto it = sys.begin(); it != sys.end(); it++)
 		{
@@ -553,7 +538,7 @@ int gfgomsf::t_gpvtfgo::processBatch(const t_gtime &beg_r, const t_gtime &end_r,
 		double percent = now.diff(_beg_time) / _end_time.diff(_beg_time) * 100.0;
 		const bool reported_fixed =
 			(!_isBase && _observ == OBSCOMBIN::RAW_ALL &&
-			 _ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE)
+			 _fix_mode != FIX_MODE::NO)
 				? _graph_ambiguity_fixed
 				: _amb_state;
 		std::cerr << "\r" << now.str_ymdhms() 
@@ -715,7 +700,7 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 	if (_last_gnss_info->valid)
 	{
 		const bool raw_feedback = !_isBase && _observ == OBSCOMBIN::RAW_ALL &&
-			_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE;
+			_fix_mode != FIX_MODE::NO;
 		if (raw_feedback)
 		{
 			const bool ambiguity_ready = _pre_amb_resolution();
@@ -744,9 +729,9 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 				bool feedback_ok = !had_fixed_candidate;
 				if (had_fixed_candidate)
 					feedback_ok =
-						_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::PARAMETER
-							? _apply_RAW_parameter_feedback()
-							: _apply_RAW_constraint_feedback();
+						_ambiguity_fix_factor_enable
+							? _apply_RAW_constraint_feedback()
+							: _apply_RAW_parameter_feedback();
 				if (had_fixed_candidate && !feedback_ok)
 				{
 					_ambfix->rollbackFeedbackTransaction();
@@ -756,8 +741,8 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 					_output_float_ambiguity_solution();
 					if (_spdlog)
 						_spdlog->warn(
-							"PPP RAW ambiguity feedback {} rejected at {}; resolver and filter rolled back, previous accepted graph state retained",
-							ambiguity_feedback_mode_name(_ambiguity_feedback_mode),
+							"PPP RAW ambiguity feedback (constraint factors {}) rejected at {}; resolver and filter rolled back, previous accepted graph state retained",
+							_ambiguity_fix_factor_enable ? "enabled" : "disabled",
 							_epoch.str_ymdhms());
 				}
 				else
@@ -781,8 +766,8 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 		}
 		else
 		{
-			// Preserve the historical NONE/IF ordering exactly: publish the
-			// floating graph before producing the separate conditional FLT output.
+			// Non-RAW or no-fix processing publishes the floating graph before
+			// producing the separate conditional FLT output.
 			publish_foat();
 			if (_pre_amb_resolution())
 				_amb_resolution();
@@ -847,7 +832,7 @@ int gfgomsf::t_gpvtfgo::processWindow(const t_gtime & now, vector<t_gsatdata>* d
 	_fgo_prof.slide.add(_slide_ms);
 
 	if (!_isBase && _observ == OBSCOMBIN::RAW_ALL &&
-		_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE)
+		_fix_mode != FIX_MODE::NO)
 		return _graph_ambiguity_fixed ? 1 : 0;
 	return _amb_state ? 1 : 0;
 }
@@ -2884,7 +2869,7 @@ bool gfgomsf::t_gpvtfgo::_pre_amb_resolution()
 {
 	GNSSInfo *ambiguity_info = _last_gnss_info;
 	t_gallpar construct_para = _all_para_win;
-	if (_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::CONSTRAINT &&
+	if (_ambiguity_fix_factor_enable &&
 		_raw_float_search_info && _raw_float_search_info->valid)
 	{
 		ambiguity_info = _raw_float_search_info.get();
@@ -3327,7 +3312,7 @@ void gfgomsf::t_gpvtfgo::_add_RAW_fixed_constraints(
     ceres::Problem &problem, const std::set<int> &problem_ambiguities)
 {
     _raw_feedback_constraint_residuals.clear();
-    if (_ambiguity_feedback_mode != AMB_FEEDBACK_MODE::CONSTRAINT)
+    if (!_ambiguity_fix_factor_enable)
         return;
 
     for (const auto &entry : _raw_fixed_constraints)
@@ -4783,11 +4768,11 @@ bool gfgomsf::t_gpvtfgo::_apply_RAW_constraint_feedback()
  * adds state priors/process factors and all code/phase measurement factors, then
  * solves and re-runs outlier rejection until no further observation is dropped.
  *
- * Under either feedback mode the float Ceres problem is retained until the
- * ambiguity candidate is validated. PARAMETER conditions the current graph
- * for one epoch and removes the temporary equations; CONSTRAINT retains them
- * for later optimization and marginalization. Any failed feedback attempt is
- * rolled back transactionally.
+ * The float Ceres problem is retained until the ambiguity candidate is
+ * validated. When ambiguity constraint factors are disabled, the current graph
+ * is conditioned for one epoch and the temporary equations are removed;
+ * otherwise the equations are retained for later optimization and
+ * marginalization. Any failed feedback attempt is rolled back transactionally.
  *
  * @return 1 on success (valid _last_gnss_info), -1 on failure (invalidates it).
  */
@@ -5174,9 +5159,9 @@ int gfgomsf::t_gpvtfgo::_optimization_PPP_RAW()
         iter_flag = _gobs_outlier_detection(outlier) >= 0;
 		_fgo_prof.raw_outlier.add(raw_prof_sw.ms());
         if (!iter_flag && _last_gnss_info && _last_gnss_info->valid &&
-            _ambiguity_feedback_mode != AMB_FEEDBACK_MODE::NONE)
+            _fix_mode != FIX_MODE::NO)
         {
-			if (_ambiguity_feedback_mode == AMB_FEEDBACK_MODE::CONSTRAINT)
+			if (_ambiguity_fix_factor_enable)
 			{
 			// Integer search must see the observation/prior posterior before
 			// still-explicit fixed factors are re-applied. Otherwise a 1e9

@@ -22,12 +22,6 @@
   },
   "experiments": [
     {
-      "name": "UPD_FF_NONE",
-      "config": "../build/parallel30/UPD_NONE.xml",
-      "workdir": "../sample_data/PPPFLT_2023305",
-      "tags": {"frequency_set": "FF", "baseline_role": "float"}
-    },
-    {
       "name": "UPD_FF_PARAMETER",
       "config": "../build/parallel30/UPD_PARAMETER.xml",
       "workdir": "../sample_data/PPPFLT_2023305",
@@ -44,12 +38,6 @@
       "config": "../build/parallel30/UPD_CONSTRAINT_GODN.xml",
       "workdir": "../sample_data/PPPFLT_2023305",
       "tags": {"frequency_set": "FF"}
-    },
-    {
-      "name": "OSB_FF_NONE",
-      "config": "../build/parallel30/OSB_NONE.xml",
-      "workdir": "../sample_data/PPPFLT_2023305_OSB",
-      "tags": {"frequency_set": "FF", "baseline_role": "float"}
     },
     {
       "name": "OSB_FF_PARAMETER",

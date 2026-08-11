@@ -13,7 +13,7 @@ Run one existing configuration (the data directory is inferred from its bias
 product):
 
   python scripts/run_fgo_experiments.py run \
-    --case UPD_FF_NONE=build/parallel30/UPD_NONE.xml \
+    --case UPD_FF_PARAMETER=build/parallel30/UPD_PARAMETER.xml \
     --reference GODN=1130760.6931,-4831298.6759,3994155.1990
 
 Run a reusable matrix:
@@ -262,7 +262,12 @@ def load_experiment(
             )
         else:
             diagnostic_logs.append(resolve_path(log_name, workdir))
-    mode = (xml_text(root, "./fgo/ambiguity_feedback_mode", "NONE") or "NONE").upper()
+    factor_enabled = (xml_text(
+        root, "./fgo/ambiguity_fix_factor_enable", "false") or "false").strip().lower()
+    if factor_enabled not in ("", "true", "false"):
+        raise ConfigurationError(
+            "<fgo><ambiguity_fix_factor_enable> must be true or false")
+    mode = "CONSTRAINT" if factor_enabled == "true" else "PARAMETER"
     frequency_text = xml_text(root, "./process/frequency")
     tags = {str(key): str(value) for key, value in dict(raw.get("tags", {})).items()}
     return Experiment(
