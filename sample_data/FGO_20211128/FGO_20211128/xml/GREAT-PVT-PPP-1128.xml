@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?> 
+<!DOCTYPE config>
+
+<config>
+ <gen>
+    <beg> "2021-11-28 08:49:00" </beg>
+    <end> "2021-11-28 09:13:00" </end>
+    <sys > GPS GAL BDS </sys>
+    <rec> SEPT </rec>
+    <rover> SEPT </rover>
+    <int> 1 </int>
+ </gen>
+ 
+ <inputs>
+   <rinexo> gnss\SEPT3320.21O</rinexo>
+   <rinexn> gnss\BRDM00DLR_S_20213320000_01D_MN.rnx </rinexn>
+   <rinexc> gnss\COD0MGXFIN_20213320000_01D_30S_CLK.CLK </rinexc>
+   <sp3> gnss\COD0MGXFIN_20213320000_01D_05M_ORB.SP3 </sp3>
+   <bias> gnss\CAS0MGXRAP_20213320000_01D_01D_DCB.BSX </bias>
+   <atx> gnss\igs14_2134.atx </atx>
+   <blq> gnss\oceanload </blq>
+   <DE> gnss\jpleph_de405 </DE>
+   <EOP> gnss\poleut1_new </EOP>
+   <!-- <leapsecond> gnss\leap_seconds </leapsecond> -->
+ </inputs>
+
+ <outputs append="false" verb="0">
+   <log type="BASIC" level="INFO" name="PPPFLT" />
+   <flt> resultPPPFLT/$(rec)-PVT.flt </flt>
+   <kml> resultPPPFLT/$(rec)-PVT.kml </kml>
+ </outputs>
+ 
+ 
+ <process>
+  <frequency> 2 </frequency>
+  <phase> true </phase>
+  <iono> false </iono>
+  <tropo> true </tropo>
+  <doppler> false </doppler>
+  <obs_combination> IONO_FREE </obs_combination>
+  <gradient> false </gradient>
+  <tropo_model> saastamoinen </tropo_model>
+  <tropo_mf> gmf </tropo_mf>
+  <ztd_model> STO </ztd_model>
+  <grad_mf> chh </grad_mf>
+  <sig_init_crd> 30 </sig_init_crd>                 <!--> initial sigma of coordinate <!-->
+  <sig_init_vel> 10 </sig_init_vel>                 <!--> initial sigma of velocity <!-->
+  <sig_init_ztd> 10 </sig_init_ztd>                 <!--> initial sigma of ztd <!-->
+  <sig_init_amb> 30 </sig_init_amb>                 <!--> initial sigma of ambiguity <!-->
+  <sig_init_gal> 10 </sig_init_gal>                 <!--> initial sigma of Galileo isb/ifb <!-->
+  <sig_init_glo> 10 </sig_init_glo>                 <!--> initial sigma of GLONASS isb/ifb <!-->
+  <sig_init_bds> 10 </sig_init_bds> 
+  <minimum_elev>7</minimum_elev>
+  <max_res_norm> 8 </max_res_norm>
+  <pos_kin>true </pos_kin>
+  <min_sat>4</min_sat>
+  <obs_weight> SINEL</obs_weight> 
+  <basepos>CFILE</basepos>
+  <slip_model>default</slip_model>
+  <bds_code_bias_corr> true </bds_code_bias_corr>
+</process> 
+   
+
+
+<filter method_flt="kalman" noise_crd="100" noise_vel="1" noise_vion="80" noise_dclk="100" rndwk_vion="1000" rndwk_ztd="6" rndwk_amb="0"/>
+
+<ambiguity>
+   <!-- <upd> WL </upd>-->       
+   <fix_mode> NO </fix_mode>      
+   <part_fix>  YES  </part_fix>   
+   <ratio>  2.5  </ratio>         
+   <add_leo>  NO   </add_leo>
+   <all_baselines>  NO  </all_baselines>
+   <min_common_time>  0  </min_common_time>               
+   <baseline_length_limit>  3500  </baseline_length_limit>
+   <widelane_interval> 30 </widelane_interval>            
+   <widelane_decision     maxdev = "0.275" maxsig = "0.10" alpha = "1000" />
+   <narrowlane_decision   maxdev = "0.375" maxsig = "0.10" alpha = "1000" />
+ </ambiguity>
+
+ <bds sigma_C="2" sigma_L="0.03" >
+ <freq>  1  2 </freq>
+ <band>  2  7 </band>
+ </bds>
+
+ <gps sigma_C="2" sigma_L="0.03" >
+  <freq>  1  2 </freq>
+  <band> 1  2  </band>
+ </gps>
+ 
+ <gal sigma_C="2" sigma_L="0.03" >
+  <freq>  1  2 </freq>
+  <band> 1  7  </band>
+ </gal>
+ 
+ <glo sigma_C="2" sigma_L="0.03" >
+  <freq>  1  2 </freq>
+    <band> 1  2  </band>
+ </glo>
+ 
+ <qzs sigma_C="2" sigma_L="0.01" >
+  <freq>  1  2 </freq>
+    <band> 1  2  </band>
+ </qzs>
+  
+ 
+</config>
+ 

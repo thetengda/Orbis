@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?> 
+<!DOCTYPE config>
+
+<config>
+ <gen>
+<beg> "2021-10-12 07:33:20" </beg>		<!--> begin time <!-->
+		<end> "2021-10-12 08:35:00" </end>  <!--> end time <!-->
+   <sys> GPS BDS GAL</sys>					<!--> system ex：GPS GAL GLO QZS BDS SBS <!-->
+   <rec> SEPT </rec>					<!--> site (4-char upper) <!-->
+   <rover> SEPT </rover>					<!--> rover site (4-char upper) <!-->
+   <sat_rm>C01 C02 C03 C04 C05</sat_rm>
+   <int> 1  </int>							<!--> sampling interval <!-->
+ </gen>
+ 
+
+
+<inputs>
+	<rinexo>
+   .\GNSS\Base\WUDA2850.21o
+   .\GNSS\SEPT2850.21O
+   </rinexo>		<!--> rinex obs file <!--> 
+  <rinexn> .\GNSS\BRDC00IGS_R_20212850000_01D_MN.rnx </rinexn>		<!--> rinex nav file <!-->
+   <rinexc>
+            .\GNSS\COD0MGXFIN_20212850000_01D_30S_CLK.CLK
+        </rinexc>       <!--> precise satellite clock offset file <!-->
+        <sp3>       
+        .\GNSS\COD0MGXFIN_20212850000_01D_05M_ORB.SP3   
+        </sp3>  
+  <atx>    ./model/igs_absolute_14_BDS.atx </atx>					<!--> Antenna correction file <!--> 
+  <blq> ./model/oceanload </blq>									<!--> oceanload file <!--> 
+  <de>  ./model/jpleph_de405_great </de>							<!--> Planetary ephemeris file <!-->
+  <eop> ./model/poleut1 </eop>										<!--> ERP file <!-->
+  <imu> ./IMU/smallimu_out.txt </imu>								<!--> imu file <!-->
+ </inputs>
+
+ <outputs append="false" verb="0">									 <!--> output file：whether append & verb：the larger the value，the more detailed the output log. <!-->
+   <log type="BASIC" level="INFO" name="PPPINSMSF" />								 <!--> log file <!-->
+   <kml> .\resultPPPINSFLT\$(rec)-PPP-INS-FLT.kml </kml>
+   <ins> .\resultPPPINSFLT\$(rec)-PPP-INS-FLT.ins  </ins>				 <!--> result file <!-->
+ </outputs>
+ 
+<filter method_flt="kalman" noise_crd="100" noise_vel="1" rnkwk_vion="1000" noise_dclk="100" rndwk_ztd="6" reset_amb="0"/>
+ 
+ 
+  <process>
+        <phase>                  true               </phase>                        <!--> use phase obs (true/false) <!-->
+        <tropo>                  true               </tropo>                        <!--> estimate trop param (true/false) <!-->
+        <iono>                   true               </iono>                         <!--> estimate iono param (true/false) <!-->
+        <doppler>                false              </doppler>                      <!--> use doppler obs (true/false) <!-->
+        <tropo_model>            saastamoinen       </tropo_model>                  <!--> trop model <!-->
+        <sig_init_crd>           30                 </sig_init_crd>                 <!--> initial sigma of coordinate <!-->
+        <sig_init_vel>           10                  </sig_init_vel>                 <!--> initial sigma of velocity <!-->
+        <sig_init_ztd>           10                  </sig_init_ztd>                 <!--> initial sigma of ztd <!-->
+        <sig_init_amb>           30                 </sig_init_amb>                 <!--> initial sigma of ambiguity <!-->
+        <sig_init_gal>           30                  </sig_init_gal>                 <!--> initial sigma of Galileo isb/ifb <!-->
+        <sig_init_glo>           30                  </sig_init_glo>                 <!--> initial sigma of GLONASS isb/ifb <!-->
+        <sig_init_bds>           30                 </sig_init_bds>                 <!--> initial sigma of BDS isb/ifb <!-->
+        <sig_init_vion>          100                </sig_init_vion>                <!--> initial sigma of slant iono <!-->
+        <minimum_elev>           7                  </minimum_elev>                 <!--> cut-off satellite elevation(deg) <!-->
+        <obs_combination>        IONO_FREE            </obs_combination>              <!--> obs comb type (IONO_FREE/RAW_ALL) <!-->
+        <max_res_norm>           5                   </max_res_norm>                 <!--> posterior residual threshold <!-->
+        <pos_kin>                true               </pos_kin>                      <!--> kinematic mode (true/false) <!-->
+        <min_sat>                4                  </min_sat>                      <!--> min satellite number <!-->
+        <obs_weight>             SINEL              </obs_weight>                   <!--> weigh model of obs <!-->
+        <bds_code_bias_corr>     true               </bds_code_bias_corr>           <!--> whether to correct BDS codeBias (true/false) <!-->
+        <slip_model>             default            </slip_model>                   <!--> cycle slip detect method <!-->
+        <frequency>              2                  </frequency>                    <!--> frequency number <!-->
+    </process>
+
+
+ <ins>
+    <ProcTime Start="0" End="1000000"/>
+	
+    <DataFormat>
+		  <AxisOrder Type="garfu"  Format="garfu/gaflu/gafrd/starneto/unicore" />
+		  <GyroUnit Type="DPS" Format="DPS/RPS/RAD/DPH/RPH" />
+		  <AcceUnit Type="MPS2" Format="MPS/MPS2" />
+		  <Frequency Value ="100" Description="Hz" />
+	  </DataFormat>
+	
+    <Alignment Type="OFF"  Format="OFF/STATIC/POS/VEL">
+		  <PositionVector Value="3" Description="m" />
+		  <VelocityVector Value="3" Description="m/s" />
+		  <CoarseAlignTime Value="300" Description="s" />
+	  </Alignment>
+	
+    <InitialStates>
+        <Position Type="Cartesian" Format="OFF/Cartesian/Geodetic" X="-2276211.641" Y="5005534.966" Z="3220937.102" Description="m"/>
+      <Velocity Type="Cartesian" Format="OFF/Cartesian"  X="1.488" Y="9.852"  Z="-13.334"  Description="m/s" />
+      <Attitude Type="ON" Format="OFF/ON" Pitch="2.1287387441" Roll="1.5142701568" Yaw="161.643644255" Description="deg" />
+      <GyroBias Type="OFF" Format="OFF/ON/Mean" X="401" Y="32"  Z="-85" Description="deg/h" />
+      <AcceBias Type="OFF" Format="OFF/ON/Mean" X="0" Y="0"  Z="0" Description="mg" />
+      <GyroScale Type="OFF" Format="OFF/Const" X="1" Y="1" Z="1" Description="#"/>
+      <AcceScale Type="OFF" Format="OFF/Const" X="1" Y="1" Z="1" Description="#"/>
+    </InitialStates> 
+	
+	  <Compensation Type="Poly" Format="OFF/Poly/Cone" Subsample="1" />
+
+  </ins>
+ 
+ 
+<integration>
+	<GNSS Type="TCI" Format="OFF/LCI/TCI">
+		<AntennaLever Type="RFU" Format="RFU/FLU/FRD" X="0.01"  Y="-0.273"  Z="0.09" Description="m" /> 
+		<SolSource Type="SyncSol" Format="SyncSol/SolFile-GREAT/SolFile-RTKLIB" />
+		<Frequency Value ="1" Description="Hz" />
+		<DelayTime Value="0.001" Description="s"/>
+		<LCISetting MinSat="5" MaxPDOP="3" />
+	</GNSS>
+	
+	<Estimator Type="Forward" Format="Forward/Backward/FBS/RTS" >
+		<IMUErrorModel Type="ADIS 16470"   Format="Customize/SPAN FSAS/SPAN CPT/ADIS 16470/StarNeto"   />
+		<Attitude InitialSTD="1,1,20" ProcNoiseSD="0.3,0.3,0.3" Description="deg" />
+		<Velocity InitialSTD="1,1,1" ProcNoiseSD="0.1,0.1,0.1" Description="m/s" />
+		<Position InitialSTD="3,3,3" ProcNoiseSD="0,0,0" Description="m" />
+		<GyroBias InitialSTD="1,1,1" ProcNoiseSD="0,0,0" Description="deg/h" />
+		<AcceBias InitialSTD="1,1,1" ProcNoiseSD="0,0,0" Description="mg" />
+	</Estimator>
+</integration>
+
+
+
+ 
+
+  <ambiguity>
+        <fix_mode>          NO          </fix_mode>                                 <!--> ambiguity fixed mode (NO/SEARCH) <!-->
+        <upd_mode>          UPD         </upd_mode>                                 <!--> upd mode <!-->                                              
+        <part_fix>          YES         </part_fix>                                 <!--> part_fix (YES/NO) <!-->  
+        <part_fix_num>      5           </part_fix_num>                             <!--> threshold in partial ambiguity fixing <!-->
+        <ratio>             2.0         </ratio>                                    <!--> threshold in LAMBDA method <!-->       
+        <set_refsat>        YES         </set_refsat>                               <!--> set_refsat (YES/NO) <!-->
+        <min_common_time>   0           </min_common_time>                          <!--> minimum common time/seconds <!-->                     
+        <extra_widelane_decision maxdev = "0.07" maxsig = "0.10" alpha = "1000" />  <!--> extra widelane setting, alpha&maxdev(Confidence interval parameter), maxsig(maximum sigma) <!-->
+        <widelane_decision maxdev = "0.275" maxsig = "0.10" alpha = "1000" />        <!--> widelane setting, option: alpha&maxdev(Confidence interval parameter), maxsig(maximum sigma) <!-->
+        <narrowlane_decision maxdev = "0.375" maxsig = "0.10" alpha = "1000" />      <!--> narrowlane setting, option: alpha&maxdev(Confidence interval parameter), maxsig(maximum sigma) <!-->
+    </ambiguity>
+ 
+ <bds sigma_C="3" sigma_L="0.03" >
+ <freq>  1 2 </freq>
+ <band>  2 7 </band>
+ </bds>
+
+ <gps sigma_C="2" sigma_L="0.02" >
+  <freq> 1  2 </freq>
+  <band> 1  2 </band>
+ </gps>
+ 
+ <gal sigma_C="3" sigma_L="0.03" >
+  <freq> 1  2  </freq>
+  <band> 1  7  </band>
+ </gal>
+ 
+ <glo sigma_C="4" sigma_L="0.04" >
+  <freq>  1  2 </freq>
+    <band> 1  2  </band>
+ </glo>
+ 
+ <qzs sigma_C="0.6" sigma_L="0.01" >
+  <freq>  1  2 </freq>
+    <band> 1  2  </band>
+ </qzs>
+ 
+
+</config>
+ 
+ 
+ 
+ 

@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?> 
+<!DOCTYPE config>
+
+<config>
+<gen>
+   <beg> "2021-10-13 08:31:00" </beg>
+   <end> "2021-10-13 09:11:00" </end>
+   <sys > GPS GAL BDS </sys>
+   <rec> SEPT</rec> 
+   <rover> SEPT </rover>
+   <int>  1   </int> 
+ </gen>
+
+ <inputs>
+   <rinexo>  
+   .\GNSS\SEPT2860.21o
+   </rinexo>
+   <rinexn> ./GNSS/brdm2860.21p</rinexn>
+   <atx> ./model/igs_absolute_14.atx </atx>
+   <blq> ./model/oceanload </blq>
+   <rinexc> ./GNSS/COD0MGXFIN_20212860000_01D_30S_CLK.CLK </rinexc>
+   <sp3>    ./GNSS/COD0MGXFIN_20212860000_01D_05M_ORB.SP3   </sp3>
+   <sinex> ./model/igs19P2059.snx </sinex>
+   <DE> ./model/jpleph_de405_great </DE>
+   <EOP> ./model/poleut1_great </EOP>
+   <!-- <imu> .\IMU\smallimu_out_2.txt    </imu> -->
+ </inputs>
+
+ <outputs append="false" verb="0">									 <!--> output file：whether append & verb：the larger the value，the more detailed the output log. <!-->
+ <log type="BASIC" level="INFO" name="PPPFLT" />								 <!--> log file <!-->
+   <kml> .\resultPPPFLT\$(rec)-PPP-FLT.kml </kml>
+   <flt> .\resultPPPFLT\$(rec)-PPP.flt </flt>			 <!--> result file <!-->
+ </outputs>
+
+ 
+<process>
+<frequency> 2 </frequency>
+<phase> true </phase>
+<iono> false </iono>
+<tropo> true </tropo>
+<doppler> false </doppler>
+<obs_combination> IONO_FREE </obs_combination>
+<gradient> false </gradient>
+<tropo_model> saastamoinen </tropo_model>
+<tropo_mf> gmf </tropo_mf>
+<ztd_model> STO </ztd_model>
+<grad_mf> chh </grad_mf>
+  <sig_init_crd> 30 </sig_init_crd>                 <!--> initial sigma of coordinate <!-->
+  <sig_init_vel> 10 </sig_init_vel>                 <!--> initial sigma of velocity <!-->
+  <sig_init_ztd> 10 </sig_init_ztd>                 <!--> initial sigma of ztd <!-->
+  <sig_init_amb> 30 </sig_init_amb>                 <!--> initial sigma of ambiguity <!-->
+  <sig_init_gal> 10 </sig_init_gal>                 <!--> initial sigma of Galileo isb/ifb <!-->
+  <sig_init_glo> 10 </sig_init_glo>                 <!--> initial sigma of GLONASS isb/ifb <!-->
+  <sig_init_bds> 10 </sig_init_bds>       
+<minimum_elev>7</minimum_elev>
+<max_res_norm>3</max_res_norm>
+<pos_kin>true </pos_kin>
+<min_sat>4</min_sat>
+<obs_weight> SINEL</obs_weight>
+<basepos>CFILE</basepos>
+<slip_model>default</slip_model>
+<bds_code_bias_corr> true </bds_code_bias_corr>
+</process>
+ 
+
+ <filter method_flt="kalman" noise_crd="100" noise_vel="1" noise_vion="80" noise_dclk="100" rndwk_vion="1000" rndwk_ztd="6" rndwk_amb="0"/>
+
+
+<turboedit  lite_mode="true" >
+ <ephemeris  valid="true"  />              <!-- 年份较老的动态数据设为true，可能观测文件没有GLO-FREQ-ID -->
+ <check_mw   valid="true" mw_limit="4.0"   />
+ <check_gf   valid="true" gf_limit="0.05"/>
+ <smooth_win value="25"   />                  <!-- unit: epoch -->
+ <check_gap  gap_limit="60"  valid="true" />    <!-- unit: epoch, 可用于实时解，也可用于事后解 -->
+</turboedit>
+
+ <ambiguity>
+   <!--upd> NONE </upd-->     
+	<!-- <fix_mode> NO/SEARCH</fix_mode>     -->
+   <fix_mode> NO </fix_mode>      
+   <part_fix>  YES  </part_fix>   
+   <part_fix_num>  4  </part_fix_num>   
+   <ratio>  3  </ratio>           
+   <add_leo>  NO   </add_leo>
+   <set_refsat> NO </set_refsat>
+   <all_baselines>  NO  </all_baselines>
+   <min_common_time>  0  </min_common_time>               
+   <baseline_length_limit>  3500  </baseline_length_limit>
+   <widelane_interval> 30 </widelane_interval>            
+   <extra_widelane_decision  maxdev = "0.1" maxsig = "0.10" alpha = "1000" />
+   <widelane_decision     maxdev = "0.275" maxsig = "0.10" alpha = "1000" />
+   <narrowlane_decision   maxdev = "0.375" maxsig = "0.10" alpha = "1000" />
+ </ambiguity>
+
+
+ 
+ <bds sigma_C="2" sigma_L="0.03">
+<freq> 1 2 </freq>
+<band> 2 7 </band>
+</bds>
+<gps sigma_C="2" sigma_L="0.03">
+<freq> 1 2 </freq>
+<band> 1 2 </band>
+</gps>
+<gal sigma_C="2" sigma_L="0.03">
+<freq> 1 2 </freq>
+<band> 1 7 </band>
+</gal>
+ 
+ <glo sigma_C="4" sigma_L="0.04" >
+  <freq>  1  2 </freq>
+    <band> 1  2  </band>
+ </glo>
+ 
+ <qzs sigma_C="0.6" sigma_L="0.01" >
+  <freq>  1  2 </freq>
+    <band> 1  2  </band>
+ </qzs> 
+ 
+</config>
+ 
+ 
+ 
+ 

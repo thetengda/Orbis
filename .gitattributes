@@ -1,0 +1,7 @@
+sample_data/RTKFLT_2020351/obs/WUDA3510.20O filter=lfs diff=lfs merge=lfs -text
+sample_data/FGO_20211128/FGO_20211128/gnss/SEPT3320.21O filter=lfs diff=lfs merge=lfs -text
+sample_data/FGO_20211012/FGO_20211012/IMU/smallimu_out.txt filter=lfs diff=lfs merge=lfs -text
+sample_data/FGO_20211012/FGO_20211012/GNSS/SEPT2850.21O filter=lfs diff=lfs merge=lfs -text
+sample_data/FGO_20211012/FGO_20211012/GNSS/Base/WUDA2850.21o filter=lfs diff=lfs merge=lfs -text
+sample_data/RTKFLT_2020351/obs/SEPT3510.20O filter=lfs diff=lfs merge=lfs -text
+sample_data/RTKFLT_2020351/reference/TC_CombinedtoGNSS.txt filter=lfs diff=lfs merge=lfs -text

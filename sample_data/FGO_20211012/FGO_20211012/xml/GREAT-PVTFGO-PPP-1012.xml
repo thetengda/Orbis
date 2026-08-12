@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?> 
+<!DOCTYPE config>
+
+<config>
+ <gen>
+   <beg> "2021-10-12 07:33:20" </beg>		<!--> begin time <!-->
+	 <end> "2021-10-12 08:35:00" </end>  <!--> end time <!-->
+   <sys> GPS BDS GAL</sys>					<!--> system ex：GPS GAL GLO QZS BDS SBS <!-->
+   <rec> SEPT </rec>					<!--> site (4-char upper) <!-->
+   <rover> SEPT </rover>					<!--> rover site (4-char upper) <!-->
+   <sat_rm>C01 C02 C03 C04 C05</sat_rm>
+   <int> 1  </int>							<!--> sampling interval <!-->
+ </gen>
+ 
+<inputs>
+	<rinexo>
+      .\GNSS\SEPT2850.21O
+  </rinexo>		<!--> rinex obs file <!--> 
+  <rinexn> 
+      .\GNSS\BRDC00IGS_R_20212850000_01D_MN.rnx 
+  </rinexn>		<!--> rinex nav file <!-->
+  <rinexc>
+      .\GNSS\COD0MGXFIN_20212850000_01D_30S_CLK.CLK
+  </rinexc>       <!--> precise satellite clock offset file <!-->
+  <sp3>       
+      .\GNSS\COD0MGXFIN_20212850000_01D_05M_ORB.SP3   
+  </sp3>  
+  <atx>    ./model/igs_absolute_14_BDS.atx </atx>					<!--> Antenna correction file <!--> 
+  <blq> ./model/oceanload </blq>									<!--> oceanload file <!--> 
+  <de>  ./model/jpleph_de405_great </de>							<!--> Planetary ephemeris file <!-->
+  <eop> ./model/poleut1 </eop>										<!--> ERP file <!-->
+ </inputs>
+
+ <outputs append="false" verb="0">									 <!--> output file：whether append & verb：the larger the value，the more detailed the output log. <!-->
+   <log type="BASIC" level="INFO" name="PPPFGO" />								 <!--> log file <!-->
+   <kml> .\resultPPPFGO\$(rec)-PPP-FGO.kml </kml>
+   <flt> .\resultPPPFGO\$(rec)-PPP.fgo </flt>
+ </outputs>
+ 
+ 
+ <process>
+  <frequency> 2 </frequency>
+  <phase> true </phase>
+  <iono> false </iono>
+  <tropo> true </tropo>
+  <doppler> false </doppler>
+  <obs_combination> IONO_FREE </obs_combination>
+  <gradient> false </gradient>
+  <tropo_model> saastamoinen </tropo_model>
+  <tropo_mf> gmf </tropo_mf>
+  <ztd_model> STO </ztd_model>
+  <grad_mf> chh </grad_mf>
+  <sig_init_crd> 150 </sig_init_crd>                 <!--> initial sigma of coordinate <!-->
+  <sig_init_vel> 10 </sig_init_vel>                 <!--> initial sigma of velocity <!-->
+  <sig_init_ztd> 10 </sig_init_ztd>                 <!--> initial sigma of ztd <!-->
+  <sig_init_amb> 30 </sig_init_amb>                 <!--> initial sigma of ambiguity <!-->
+  <sig_init_gal> 10 </sig_init_gal>                 <!--> initial sigma of Galileo isb/ifb <!-->
+  <sig_init_glo> 10 </sig_init_glo>                 <!--> initial sigma of GLONASS isb/ifb <!-->
+  <sig_init_bds> 10 </sig_init_bds>                 <!--> initial sigma of BDS isb/ifb <!-->
+  <minimum_elev>7</minimum_elev>
+  <max_res_norm>3</max_res_norm>
+  <pos_kin>true </pos_kin>
+  <min_sat>4</min_sat>
+  <obs_weight> SINEL</obs_weight> 
+  <basepos>CFILE</basepos>
+  <slip_model>default</slip_model>
+  <bds_code_bias_corr> true </bds_code_bias_corr>
+</process> 
+   
+<fgo>   
+   <gnss_enable> 1 </gnss_enable>				<!-->@@@MODE@@@<-->		<!-->	use gnss or not, option:1yes 0no	<-->
+   <amb_propagation> 1 </amb_propagation>							    <!-->	ambiguity propagation, default: 1<--> 
+   <gnss_window_size> 2 </gnss_window_size>							    <!-->	gnss window size, default: 2, less than 50 (else will error)<-->  
+ </fgo> 
+
+ <filter
+    noise_clk="500"
+    noise_crd="100"
+    noise_vel="100"
+    noise_dclk="1000"
+    rndwk_ztd="2"
+/>
+
+<ambiguity>
+   <!-- <upd> WL </upd>-->       
+   <fix_mode> NO </fix_mode>      
+   <part_fix>  YES  </part_fix>   
+   <ratio>  2.5  </ratio>         
+   <add_leo>  NO   </add_leo>
+   <all_baselines>  NO  </all_baselines>
+   <min_common_time>  0  </min_common_time>               
+   <baseline_length_limit>  3500  </baseline_length_limit>
+   <widelane_interval> 30 </widelane_interval>            
+   <widelane_decision     maxdev = "0.275" maxsig = "0.10" alpha = "1000" />
+   <narrowlane_decision   maxdev = "0.375" maxsig = "0.10" alpha = "1000" />
+ </ambiguity>
+
+ <bds sigma_C="3" sigma_L="0.03" >
+ <freq>  1 2 </freq>
+ <band>  2 7 </band>
+ </bds>
+
+ <gps sigma_C="2" sigma_L="0.02" >
+  <freq> 1  2 </freq>
+  <band> 1  2 </band>
+ </gps>
+ 
+ <gal sigma_C="3" sigma_L="0.03" >
+  <freq> 1  2  </freq>
+  <band> 1  7  </band>
+ </gal>
+ 
+ <glo sigma_C="2" sigma_L="0.03" >
+  <freq>  1  2 </freq>
+    <band> 1  2  </band>
+ </glo>
+ 
+ <qzs sigma_C="2" sigma_L="0.01" >
+  <freq>  1  2 </freq>
+    <band> 1  2  </band>
+ </qzs>
+  
+ 
+</config>
+ 
